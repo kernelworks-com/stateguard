@@ -1,0 +1,6 @@
+STATEGUARD_TRACE|1
+allocate|buffer-1|1|4096|cpu
+bind_state|buffer-1|1|state-1|demo|model-r1|cpu-cache|layer-0|prefix-42|0|16|fp16|row-major|absolute
+publish|state-1|buffer-1|1|-
+consume|request-1|state-1|buffer-1|1|demo|model-r1|cpu-cache|layer-0|prefix-43|0|16|fp16|row-major|absolute
+end|complete
