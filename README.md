@@ -1,76 +1,102 @@
 # Stateguard
 
-**Inference-state diagnostics from Kernelworks.**
+**Find when cached inference state is reused before its users are finished.**
 
-Stateguard is a planned native tool for detecting invalid state lifetimes in
-inference runtimes. Its focus is the logical correctness of cached state as it
-is shared, transferred, cancelled, recycled, and consumed.
+A memory address can still exist while the state stored there belongs to a
+different request or allocation generation. Stateguard checks recorded lifecycle
+events to help inference engineers spot those mistakes and identify the operation
+or allocation involved.
 
-## Project status
+**Available today:** an experimental C++ CPU checker, a trace CLI, and synthetic
+examples. It runs locally without a GPU. Connecting it to a serving engine requires
+instrumentation; there is no ready-made engine adapter yet.
 
-**Pre-implementation.** This repository currently contains project documentation.
-There is no installable library, supported engine integration, or published
-performance result yet. The interfaces below describe intended behavior.
+## Try a safe trace and a broken one
 
-## The problem
+You need a C++20 compiler and CMake 3.20+.
+[Build help](docs/BUILDING.md) covers installation and common macOS errors.
 
-An address can be valid while the state stored there is wrong for its consumer.
-Asynchronous transfers and cache reuse make it difficult to determine whether a
-page still represents the model, prefix, token range, and allocation generation a
-request expects.
+```sh
+git clone https://github.com/kernelworks-com/stateguard.git
+cd stateguard
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 2
+./build/stateguard-check tests/fixtures/safe_deferred_reclaim.sgtrace
+```
 
-For example, an operation associated with a cancelled request might outlive the
-allocation it was given. A useful diagnostic must connect the operation's lifetime
-to the allocation's reuse, rather than merely checking whether the pointer exists.
+Already in the repository? Start at the `cmake` command. The safe trace prints:
 
-## Intended capabilities
+```text
+clean
+```
 
-- Track logical state identity and allocation generations.
-- Model valid sharing between requests without treating every shared page as an error.
-- Record ownership and dependencies of asynchronous operations.
-- Explain invalid reuse or consumption with a compact event trace.
-- Reduce a failing trace into a smaller reproducible scenario.
-- Support a portable CPU checker first, followed by explicit native integration points.
+Now check the deliberately broken trace:
 
-Stateguard is intended to run in the user's environment. Core diagnostics are
-intended to work without a hosted service or mandatory telemetry.
+```sh
+./build/stateguard-check tests/fixtures/premature_reclaim.sgtrace
+```
 
-## Intended workflow
+Its output starts with:
 
-Instrument allocation, transfer, retirement, and consumption boundaries; capture
-an event trace; run the checker; inspect a diagnostic tied to the relevant state
-and operation identifiers. Capture coverage and dropped events must be visible.
+```text
+violation
+4 premature_reclaim: allocation reclaimed while obligations remain (operation lease is still active)
+  allocation=buffer-1
+  generation=1
+```
 
-No command-line syntax or C++ API is stable yet. Build and installation instructions
-will be added when a runnable implementation is available.
+The buffer was reclaimed while an operation could still access it. This command
+intentionally exits with code **1** because it found a violation.
 
-## Scope and limitations
+## Understand the result
 
-Stateguard is planned as a diagnostic tool, not a proof that every inference result
-is correct. Missing instrumentation limits what can be checked. A late completion
-check cannot undo a DMA write that has already happened; preventing such writes
-requires an appropriate ownership and transport protocol.
+| Result | Meaning | Exit code |
+|---|---|---|
+| `clean` | No modeled violation found in a trace with complete required evidence. | 0 |
+| `violation` | An observed event breaks a checked lifetime or identity rule. | 1 |
+| `inconclusive` | Events or completion evidence are missing. | 2 |
+| Input error | The file, command, or trace format could not be accepted. | 3 |
 
-Initial work targets a small, documented event model and CPU reference harness.
-CUDA and serving-engine support will be listed only after integration testing.
+A clean result applies to the supplied events and modeled rules. It does not prove
+that an uninstrumented engine or every inference result is correct.
 
-## Relationship to other tools
+## What you can check
 
-Native memory checkers, deterministic fault testing, cache provenance systems,
-and engine-specific regression suites cover related problems. Stateguard's research
-focus is whether a portable semantic-state model can make lifetime failures easier
-to detect and reproduce.
+- Reuse or consumption with a stale allocation generation or mismatched state.
+- Reclaiming storage while a consumer or operation still holds it.
+- Writing to published immutable state, or publishing before writers finish.
+- Invalid lifecycle transitions, orphaned operations, and duplicate completions.
+- Missing completion evidence and gaps in capture coverage.
 
-Relevant work includes the [TensorRT-LLM fault-injection proposal](https://github.com/NVIDIA/TensorRT-LLM/issues/18450)
-and [KV-transfer lifecycle documentation](https://nvidia.github.io/TensorRT-LLM/latest/developer-guide/kv-transfer.html).
-The project makes no claim to have invented inference testing or cache ownership.
+Legitimate shared state is allowed. Cancelling a request does not automatically
+release an operation's access to memory.
 
-## Kernelworks
+## Use it with your own events
 
-Stateguard is an independent Kernelworks project. It does not require Yieldpoint
-or Branchforge.
+Start with the [instrumented CPU example](examples/instrumented_demo.cpp), which
+constructs events and runs the checker. Run it with:
 
-## License
+```sh
+./build/stateguard-instrumented-demo
+```
 
-Apache License 2.0. See [LICENSE](LICENSE). Third-party dependencies and model
-artifacts, when introduced, retain their own license terms.
+For integration, emit typed events through the [public headers](include/stateguard/stateguard.hpp)
+or follow the [trace fixtures](tests/fixtures). The [technical reference](docs/REFERENCE.md)
+explains descriptors, publication proofs, cancellation, and trace coverage.
+
+CUDA, RDMA/NIXL, serving-engine adapters, trace reduction, and timeline reporting
+are future work. Stateguard diagnoses recorded events; it does not prevent a device
+from writing to memory.
+
+## Tests and feedback
+
+```sh
+ctest --test-dir build --output-on-failure --no-tests=error
+```
+
+For build automation, see [CI details](.github/CI.md).
+[Report a problem](https://github.com/kernelworks-com/stateguard/issues) with a small
+synthetic trace and your expected result. Do not attach private production captures.
+
+Stateguard is an independent [Kernelworks](https://github.com/kernelworks-com)
+project; no sibling project is required. Licensed under [Apache-2.0](LICENSE).
