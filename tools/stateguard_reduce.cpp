@@ -98,7 +98,8 @@ int main(int argc, char** argv) {
   }
 
   std::cerr << "target: " << stateguard::to_string(result.status) << ' '
-            << stateguard::to_string(result.target.category) << " at event "
+            << stateguard::to_string(result.target.category)
+            << (result.target.confirmed ? "" : " [unconfirmed]") << " at event "
             << result.target.event_index << ": " << result.target.message << '\n';
   for (const auto& witness : result.target.witness) std::cerr << "  " << witness << '\n';
   std::cerr << "reduced " << result.original_events << " -> " << result.trace.events.size()

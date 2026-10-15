@@ -18,17 +18,18 @@ class ReductionError : public std::invalid_argument {
 // Decides whether a candidate trace still reproduces a chosen failure of an
 // original trace under this checker version. A candidate reproduces it when:
 //   - its status equals the original status;
-//   - it reports the target diagnostic (same category, message, and witness);
+//   - it reports the target diagnostic (same category, message, witness, and
+//     confirmation);
 //   - every diagnostic it reports was also reported for the original.
 // The last rule rejects candidates where deletion manufactured a different
 // failure or new missing evidence, such as an unknown allocation or an
 // operation whose completion was removed.
 class ReductionOracle {
  public:
-  // Selects the first diagnostic of `category`, or by default the first
-  // definite violation (the first incomplete-evidence diagnostic when the trace
-  // is only inconclusive). Throws ReductionError when the trace is clean, uses
-  // an unsupported schema, or has no suitable diagnostic.
+  // Selects the first diagnostic of `category` (preferring a confirmed one), or
+  // by default the first confirmed violation (the first diagnostic when the
+  // trace is only inconclusive). Throws ReductionError when the trace is clean,
+  // uses an unsupported schema, or has no suitable diagnostic.
   explicit ReductionOracle(const Trace& original,
                            std::optional<DiagnosticCategory> category = std::nullopt);
 

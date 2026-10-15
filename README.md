@@ -55,7 +55,7 @@ intentionally exits with code **1** because it found a violation.
 |---|---|---|
 | `clean` | No modeled violation found in a trace with complete required evidence. | 0 |
 | `violation` | An observed event breaks a checked lifetime or identity rule. | 1 |
-| `inconclusive` | Events or completion evidence are missing. | 2 |
+| `inconclusive` | Events or completion evidence are missing. Findings after lost events are listed as `[unconfirmed]`. | 2 |
 | Input error | The file, command, or trace format could not be accepted. | 3 |
 
 A clean result applies to the supplied events and modeled rules. It does not prove

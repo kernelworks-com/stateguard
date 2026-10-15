@@ -16,11 +16,12 @@ namespace {
 
 bool same_finding(const Diagnostic& a, const Diagnostic& b) {
   // Event indices shift as events are removed; the finding itself does not.
-  return a.category == b.category && a.message == b.message && a.witness == b.witness;
+  return a.category == b.category && a.message == b.message && a.witness == b.witness &&
+         a.confirmed == b.confirmed;
 }
 
-bool definite(const Diagnostic& diagnostic) {
-  return diagnostic.category != DiagnosticCategory::IncompleteEvidence;
+bool confirmed_violation(const Diagnostic& diagnostic) {
+  return diagnostic.category != DiagnosticCategory::IncompleteEvidence && diagnostic.confirmed;
 }
 
 using Keys = std::set<std::string>;
@@ -282,18 +283,21 @@ ReductionOracle::ReductionOracle(const Trace& original,
       throw ReductionError(
           "trace has definite violations; incomplete evidence cannot be reduced on its own");
     }
+    // Prefer a confirmed finding; an unconfirmed one is reduced only when it
+    // is the sole finding of that category.
     for (const auto& diagnostic : report.diagnostics) {
-      if (diagnostic.category == *category) {
+      if (diagnostic.category != *category) continue;
+      if (target == nullptr || (!target->confirmed && diagnostic.confirmed)) {
         target = &diagnostic;
-        break;
       }
+      if (target->confirmed) break;
     }
     if (target == nullptr) {
       throw ReductionError("trace reports no " + to_string(*category) + " diagnostic");
     }
   } else {
     for (const auto& diagnostic : report.diagnostics) {
-      if (report.status == CheckStatus::Inconclusive || definite(diagnostic)) {
+      if (report.status == CheckStatus::Inconclusive || confirmed_violation(diagnostic)) {
         target = &diagnostic;
         break;
       }

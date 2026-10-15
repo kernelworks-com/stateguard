@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -68,7 +69,8 @@ std::vector<Fault> planted_faults() {
 }
 
 bool same_finding(const Diagnostic& a, const Diagnostic& b) {
-  return a.category == b.category && a.message == b.message && a.witness == b.witness;
+  return a.category == b.category && a.message == b.message && a.witness == b.witness &&
+         a.confirmed == b.confirmed;
 }
 
 void test_generation_is_deterministic() {
@@ -200,6 +202,87 @@ void test_planted_faults_are_reported_where_planted() {
   }
 }
 
+// Simulates capture loss: removes 1-3 events at or after `from` (never the end
+// marker) and records a coverage gap where the first event went missing.
+Trace drop_events(const Trace& trace, std::size_t from, std::uint64_t seed) {
+  std::uint64_t state = seed;
+  const auto next = [&state](std::size_t bound) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<std::size_t>((state >> 33) % bound);
+  };
+  const std::size_t last = trace.events.size() - 1;  // the end marker
+  std::set<std::size_t> dropped{from};
+  const auto extra = next(3);
+  for (std::size_t i = 0; i < extra && from + 1 < last; ++i) {
+    dropped.insert(from + 1 + next(last - from - 1));
+  }
+  Trace result;
+  result.schema = trace.schema;
+  for (std::size_t i = 0; i < trace.events.size(); ++i) {
+    if (i == from) result.events.push_back(CoverageGapEvent{"simulated capture loss"});
+    if (!dropped.contains(i)) result.events.push_back(trace.events[i]);
+  }
+  return result;
+}
+
+void test_capture_loss_never_yields_a_confirmed_violation() {
+  // Every history here was legal before events were dropped, so any definite
+  // finding is an artifact of the loss and must not be reported as confirmed.
+  std::size_t artifacts = 0;
+  for (auto config : shapes()) {
+    for (std::uint64_t seed = 0; seed < 200; ++seed) {
+      config.seed = seed;
+      const auto legal = generate_trace(config).trace;
+      if (legal.events.size() < 2) continue;
+      const auto from = static_cast<std::size_t>(fnv1a(std::to_string(seed)) %
+                                                 (legal.events.size() - 1));
+      const auto lossy = drop_events(legal, from, seed);
+      const auto report = check(lossy);
+      require(report.status == CheckStatus::Inconclusive,
+              "capture loss produced " + to_string(report.status) + ": " + label(config));
+      for (const auto& diagnostic : report.diagnostics) {
+        require(diagnostic.event_index >= from,
+                "a finding appeared in the fully captured prefix: " + label(config));
+        if (diagnostic.category != DiagnosticCategory::IncompleteEvidence) {
+          require(!diagnostic.confirmed,
+                  "a loss artifact was confirmed (" + diagnostic.message + "): " + label(config));
+          ++artifacts;
+        }
+      }
+    }
+  }
+  // Without the confirmation rule each artifact would have been a violation.
+  require(artifacts > 0, "dropped events never produced an artifact; the test is vacuous");
+  std::cout << "  " << artifacts << " loss artifacts reported as unconfirmed\n";
+}
+
+void test_violations_before_capture_loss_stay_confirmed() {
+  for (auto config : shapes()) {
+    for (const auto fault : planted_faults()) {
+      config.fault = fault;
+      for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        config.seed = seed;
+        const auto generated = generate_trace(config);
+        if (generated.expected_status != CheckStatus::Violation) continue;
+        const auto planted = *generated.fault_event;
+        const auto last = generated.trace.events.size() - 1;
+        if (planted + 1 >= last) continue;
+        const auto from = planted + 1 + static_cast<std::size_t>(seed % (last - planted - 1));
+        const auto report = check(drop_events(generated.trace, from, seed));
+        require(report.status == CheckStatus::Violation,
+                "a violation before the loss was hidden: " + label(config));
+        bool confirmed = false;
+        for (const auto& diagnostic : report.diagnostics) {
+          confirmed = confirmed || (diagnostic.event_index == planted &&
+                                    diagnostic.category == *generated.expected_category &&
+                                    diagnostic.confirmed);
+        }
+        require(confirmed, "the planted finding lost its confirmation: " + label(config));
+      }
+    }
+  }
+}
+
 void test_round_trip_preserves_generated_traces() {
   for (const auto fault : fault_kinds()) {
     GeneratorConfig config;
@@ -246,8 +329,9 @@ void test_configuration_is_validated() {
 }
 
 void require_valid_reduction(const Trace& original, const ReductionResult& result,
-                             const std::string& context) {
-  const ReductionOracle oracle(original);
+                             const std::string& context,
+                             std::optional<DiagnosticCategory> category = std::nullopt) {
+  const ReductionOracle oracle(original, category);
   require(oracle.reproduced_by(result.trace), "reduced trace lost the failure: " + context);
   require(result.one_minimal, "reduction did not reach a 1-minimal trace: " + context);
   require(result.trace.events.size() == result.kept_events.size(),
@@ -389,6 +473,24 @@ void test_inconclusive_reduction() {
           "reduced missing-evidence trace was not inconclusive");
 }
 
+void test_reduction_keeps_findings_unconfirmed() {
+  // Deleting the coverage gap would turn an unconfirmed finding into a
+  // confirmed violation. The oracle must keep the gap in the witness.
+  const auto lost = parse_trace(fixture("coverage_gap_unconfirmed.sgtrace"));
+  ReductionOptions options;
+  options.category = DiagnosticCategory::PrematureReclaim;
+  const auto result = reduce_trace(lost, options);
+  require_valid_reduction(lost, result, "coverage_gap_unconfirmed fixture", options.category);
+  require(!result.target.confirmed, "the reduction target should be unconfirmed");
+  bool gap = false;
+  for (const auto& event : result.trace.events) {
+    gap = gap || std::holds_alternative<CoverageGapEvent>(event);
+  }
+  require(gap, "reduction removed the coverage gap that explains the finding");
+  require(check(result.trace).status == CheckStatus::Inconclusive,
+          "a reduced unconfirmed finding must stay inconclusive");
+}
+
 void test_reduction_errors_and_budget() {
   const auto expect_error = [](const Trace& trace, ReductionOptions options,
                                const std::string& message) {
@@ -442,12 +544,17 @@ int main() {
       {"legal histories are clean", test_legal_histories_are_clean},
       {"planted faults are reported where planted",
        test_planted_faults_are_reported_where_planted},
+      {"capture loss never yields a confirmed violation",
+       test_capture_loss_never_yields_a_confirmed_violation},
+      {"violations before capture loss stay confirmed",
+       test_violations_before_capture_loss_stay_confirmed},
       {"round trip preserves generated traces", test_round_trip_preserves_generated_traces},
       {"configuration is validated", test_configuration_is_validated},
       {"reduction preserves planted failures", test_reduction_preserves_planted_failures},
       {"reduction of fixtures", test_reduction_of_fixtures},
       {"oracle rejects manufactured failures", test_oracle_rejects_manufactured_failures},
       {"inconclusive reduction", test_inconclusive_reduction},
+      {"reduction keeps findings unconfirmed", test_reduction_keeps_findings_unconfirmed},
       {"reduction errors and budget", test_reduction_errors_and_budget},
   };
   int failures = 0;

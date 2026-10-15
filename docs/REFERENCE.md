@@ -27,8 +27,35 @@ The public headers are in `include/stateguard/`. The core accepts typed state,
 allocation, generation, request, and operation identities. A clean result
 requires an explicit `end|complete` event. Dropped events, an incomplete end
 marker, an unresolved operation, or a missing end marker produce an
-`inconclusive` result. Definite invariant violations remain `violation` even
-when the same trace also has incomplete coverage.
+`inconclusive` result.
+
+## Findings after capture loss
+
+A missing event can create a finding that is not real. For example, if a
+completion is dropped, a later reclaim looks premature. The checker therefore
+reports a finding as `violation` only when every event before it was captured:
+
+- A finding before the first `coverage_gap` stays confirmed. The checker replays
+  events in order, so such a finding depends only on captured events. The trace
+  is a `violation` even though it also has a gap.
+- A finding after a `coverage_gap` is listed with `[unconfirmed]` and makes the
+  trace `inconclusive`. In the API, it has `Diagnostic::confirmed == false`.
+- `end|incomplete` does not say where events were lost, so every finding in that
+  trace is unconfirmed. Record a `coverage_gap` at the point of loss to keep
+  earlier findings confirmed.
+- A trace with no end marker lost only its tail. Findings in the observed
+  prefix stay confirmed, and the trace is still reported as incomplete.
+
+```text
+inconclusive
+3 incomplete_evidence: capture coverage gap: dropped completion records
+...
+8 premature_reclaim [unconfirmed]: allocation reclaimed while obligations remain (operation lease is still active)
+```
+
+That is `tests/fixtures/coverage_gap_unconfirmed.sgtrace`: a safe trace whose
+completion record was lost. Every finding after the gap comes from the lost
+event, so the result is inconclusive instead of a false violation.
 
 The checker currently reports stale generations, incompatible semantic reuse,
 writes against published immutable state, premature reclaim, orphaned or
@@ -50,7 +77,9 @@ diagnostic. `--category NAME` selects another category; the names are the ones
 A candidate trace reproduces the target only when all of these hold:
 
 - It has the same status (`violation` or `inconclusive`).
-- It reports the target with the same category, message, and witness lines.
+- It reports the target with the same category, message, witness lines, and
+  confirmation. Deleting a coverage gap cannot turn an unconfirmed finding
+  into a violation.
   Messages name identities and obligations, so a premature reclaim found by a
   live lease does not turn into one found by a live consumer.
 - Every diagnostic it reports was also reported for the original trace.
