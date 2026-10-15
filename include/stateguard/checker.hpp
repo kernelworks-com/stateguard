@@ -3,7 +3,9 @@
 #include "stateguard/types.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace stateguard {
@@ -46,6 +48,9 @@ CheckReport check(const Trace& trace);
 
 std::string to_string(CheckStatus status);
 std::string to_string(DiagnosticCategory category);
+
+// Accepts the names produced by to_string(DiagnosticCategory).
+std::optional<DiagnosticCategory> parse_category(std::string_view name);
 
 }  // namespace stateguard
 
