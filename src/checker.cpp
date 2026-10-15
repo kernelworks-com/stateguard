@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -43,6 +44,10 @@ struct Replay {
   CheckReport report;
   bool ended = false;
   std::size_t end_index = 0;
+  // Where events may first be missing. Replay is in trace order, so a finding
+  // before this point depends only on fully captured events.
+  std::optional<std::size_t> first_gap;
+  bool unlocated_loss = false;
 
   void diagnostic(DiagnosticCategory category, std::size_t index,
                   std::string message, std::vector<std::string> witness = {}) {
@@ -444,6 +449,7 @@ struct Replay {
   }
 
   void apply(const CoverageGapEvent& event, std::size_t index) {
+    if (!first_gap) first_gap = index;
     diagnostic(DiagnosticCategory::IncompleteEvidence, index,
                "capture coverage gap: " + event.reason);
   }
@@ -458,6 +464,9 @@ struct Replay {
     end_index = index;
     report.capture_complete = event.capture_complete;
     if (!event.capture_complete) {
+      // The marker does not say where events were lost, so any point may be
+      // affected. A precise capture records a coverage gap at the loss.
+      unlocated_loss = true;
       diagnostic(DiagnosticCategory::IncompleteEvidence, index,
                  "trace explicitly ended with incomplete capture coverage");
     }
@@ -476,16 +485,19 @@ struct Replay {
                    {"operation=" + operation.value});
       }
     }
+    for (auto& d : report.diagnostics) {
+      if (d.category == DiagnosticCategory::IncompleteEvidence) continue;
+      d.confirmed = !unlocated_loss && !(first_gap && d.event_index > *first_gap);
+    }
+    // A truncated trace without an end marker lost only its tail; findings in
+    // the observed prefix stay confirmed.
     const bool definite = std::any_of(
         report.diagnostics.begin(), report.diagnostics.end(), [](const Diagnostic& d) {
-          return d.category != DiagnosticCategory::IncompleteEvidence;
+          return d.category != DiagnosticCategory::IncompleteEvidence && d.confirmed;
         });
     if (definite) {
       report.status = CheckStatus::Violation;
-    } else if (std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
-                           [](const Diagnostic& d) {
-                             return d.category == DiagnosticCategory::IncompleteEvidence;
-                           })) {
+    } else if (!report.diagnostics.empty()) {
       report.status = CheckStatus::Inconclusive;
     } else {
       report.status = CheckStatus::Clean;

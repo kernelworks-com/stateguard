@@ -36,7 +36,8 @@ int main(int argc, char** argv) {
   std::cout << stateguard::to_string(report.status) << '\n';
   for (const auto& diagnostic : report.diagnostics) {
     std::cout << diagnostic.event_index << ' ' <<
-        stateguard::to_string(diagnostic.category) << ": " <<
+        stateguard::to_string(diagnostic.category) <<
+        (diagnostic.confirmed ? "" : " [unconfirmed]") << ": " <<
         diagnostic.message << '\n';
     for (const auto& witness : diagnostic.witness) {
       std::cout << "  " << witness << '\n';

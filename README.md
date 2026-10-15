@@ -7,8 +7,9 @@ different request or allocation generation. Stateguard checks recorded lifecycle
 events to help inference engineers spot those mistakes and identify the operation
 or allocation involved.
 
-**Available today:** an experimental C++ CPU checker, a trace CLI, and synthetic
-examples. It runs locally without a GPU. Connecting it to a serving engine requires
+**Available today:** an experimental C++ CPU checker, a trace CLI, a reducer that
+shrinks a failing trace to a small witness, a deterministic generator of synthetic
+lifecycle histories, and examples. It runs locally without a GPU. Connecting it to a serving engine requires
 instrumentation; there is no ready-made engine adapter yet.
 
 ## Try a safe trace and a broken one
@@ -54,7 +55,7 @@ intentionally exits with code **1** because it found a violation.
 |---|---|---|
 | `clean` | No modeled violation found in a trace with complete required evidence. | 0 |
 | `violation` | An observed event breaks a checked lifetime or identity rule. | 1 |
-| `inconclusive` | Events or completion evidence are missing. | 2 |
+| `inconclusive` | Events or completion evidence are missing. Findings after lost events are listed as `[unconfirmed]`. | 2 |
 | Input error | The file, command, or trace format could not be accepted. | 3 |
 
 A clean result applies to the supplied events and modeled rules. It does not prove
@@ -71,6 +72,50 @@ that an uninstrumented engine or every inference result is correct.
 Legitimate shared state is allowed. Cancelling a request does not automatically
 release an operation's access to memory.
 
+## Shrink a failing trace
+
+A captured trace can contain thousands of unrelated events. `stateguard-reduce`
+keeps only the events needed to reproduce the same diagnostic:
+
+```sh
+./build/stateguard-reduce tests/fixtures/premature_reclaim.sgtrace
+```
+
+The reduced trace goes to standard output (or `--output FILE`), followed by a
+summary on standard error:
+
+```text
+STATEGUARD_TRACE|1
+allocate|buffer-1|1|4096|cpu
+submit|copy-1|request-1|r:buffer-1:1|
+retire|buffer-1|1
+reclaim|buffer-1|1
+end|complete
+target: violation premature_reclaim at event 4: allocation reclaimed while obligations remain (operation lease is still active)
+  allocation=buffer-1
+  generation=1
+reduced 6 -> 5 events in 40 checks (1-minimal)
+kept original events: 0 2 3 4 5
+```
+
+The reducer only deletes events. It never reorders or rewrites them, and it
+rejects any deletion that would create a failure the original trace did not
+have. Choose a different failure with `--category NAME`. The command exits with
+**0** after a reduction, **1** if the trace has no failure to reduce, and **3** for
+an input error.
+
+To test your own tooling, `stateguard-generate` writes a random but valid history
+for a seed. It can also plant one known fault:
+
+```sh
+./build/stateguard-generate --seed 7 --fault premature_reclaim --output generated.sgtrace
+./build/stateguard-check generated.sgtrace
+./build/stateguard-reduce generated.sgtrace
+```
+
+The same seed and options produce the same trace on every platform. List the
+available faults with `--list-faults`.
+
 ## Use it with your own events
 
 Start with the [instrumented CPU example](examples/instrumented_demo.cpp), which
@@ -84,8 +129,7 @@ For integration, emit typed events through the [public headers](include/stategua
 or follow the [trace fixtures](tests/fixtures). The [technical reference](docs/REFERENCE.md)
 explains descriptors, publication proofs, cancellation, and trace coverage.
 
-CUDA, RDMA/NIXL, serving-engine adapters, trace reduction, and timeline reporting
-are future work. Stateguard diagnoses recorded events; it does not prevent a device
+CUDA, RDMA/NIXL, serving-engine adapters, and timeline reporting are future work. Stateguard diagnoses recorded events; it does not prevent a device
 from writing to memory.
 
 ## Tests and feedback

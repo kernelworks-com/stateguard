@@ -29,8 +29,15 @@ struct Diagnostic {
   std::size_t event_index = 0;
   std::string message;
   std::vector<std::string> witness;
+  // False when events may be missing before this finding: it follows a
+  // coverage gap, or the trace ended incomplete without saying where events
+  // were lost. A missing event (a completion or cancellation, say) could
+  // explain an unconfirmed finding, so it makes the trace inconclusive rather
+  // than a violation. Incomplete-evidence diagnostics are always confirmed.
+  bool confirmed = true;
 };
 
+// A trace is a Violation only when it has a confirmed definite finding.
 struct CheckReport {
   CheckStatus status = CheckStatus::Inconclusive;
   bool capture_complete = false;

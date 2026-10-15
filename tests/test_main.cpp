@@ -163,6 +163,51 @@ void test_missing_completion_is_inconclusive() {
           "capture gap must be inconclusive");
 }
 
+void test_findings_after_coverage_gap_are_unconfirmed() {
+  // The capture lost copy-1's completion. Every later finding follows from that
+  // loss, so none of them may be reported as a definite violation.
+  const auto lost = fixture_report("coverage_gap_unconfirmed.sgtrace");
+  require(lost.status == CheckStatus::Inconclusive,
+          "findings after a coverage gap must be inconclusive, got " + to_string(lost.status));
+  require(has_category(lost, DiagnosticCategory::PrematureReclaim) &&
+              has_category(lost, DiagnosticCategory::InvalidStateTransition),
+          "findings after a coverage gap must still be listed");
+  for (const auto& diagnostic : lost.diagnostics) {
+    const bool evidence = diagnostic.category == DiagnosticCategory::IncompleteEvidence;
+    require(diagnostic.confirmed == evidence,
+            "only incomplete-evidence findings are confirmed after a gap: " +
+                diagnostic.message);
+  }
+
+  // A violation observed before the gap depends only on captured events.
+  auto before = parse_trace(fixture("premature_reclaim.sgtrace"));
+  before.events.insert(before.events.end() - 1, CoverageGapEvent{"late capture loss"});
+  const auto before_report = check(before);
+  require(before_report.status == CheckStatus::Violation,
+          "a violation before the gap must stay a violation");
+  for (const auto& diagnostic : before_report.diagnostics) {
+    if (diagnostic.category == DiagnosticCategory::PrematureReclaim) {
+      require(diagnostic.confirmed, "a finding before the gap must stay confirmed");
+    }
+  }
+
+  // An incomplete end marker does not say where events were lost.
+  auto unlocated = parse_trace(fixture("write_shared_state.sgtrace"));
+  std::get<EndTraceEvent>(unlocated.events.back()).capture_complete = false;
+  const auto unlocated_report = check(unlocated);
+  require(unlocated_report.status == CheckStatus::Inconclusive,
+          "an incomplete end marker must make every finding unconfirmed");
+  require(has_category(unlocated_report, DiagnosticCategory::WriteThroughSharedImmutableState),
+          "unconfirmed findings must still be listed");
+
+  // Truncation loses only the tail: the observed prefix is fully captured.
+  auto truncated = parse_trace(fixture("write_shared_state.sgtrace"));
+  truncated.events.pop_back();
+  const auto truncated_report = check(truncated);
+  require(truncated_report.status == CheckStatus::Violation,
+          "a finding in a truncated trace's prefix must stay a violation");
+}
+
 void test_publication_requires_writer_completion_proof() {
   const AllocationRef buffer{AllocationId("buffer-1"), 1};
   const auto state = StateId("state-1");
@@ -297,6 +342,7 @@ int main() {
       {"failure fixtures", test_failure_fixtures},
       {"cancellation lease", test_cancellation_does_not_release_access_lease},
       {"missing completion", test_missing_completion_is_inconclusive},
+      {"findings after a coverage gap", test_findings_after_coverage_gap_are_unconfirmed},
       {"publication writer proof", test_publication_requires_writer_completion_proof},
       {"typed API validation", test_typed_api_rejects_malformed_identities},
       {"unknown access kind", test_unknown_access_kind_is_rejected},
