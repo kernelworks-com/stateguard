@@ -472,7 +472,8 @@ struct Replay {
       if (!record.completed) {
         diagnostic(DiagnosticCategory::IncompleteEvidence, end_index,
                    "operation " + operation.value +
-                       " has no observed access completion");
+                       " has no observed access completion",
+                   {"operation=" + operation.value});
       }
     }
     const bool definite = std::any_of(
@@ -534,6 +535,18 @@ std::string to_string(DiagnosticCategory category) {
     case DiagnosticCategory::MalformedTrace: return "malformed_trace";
   }
   return "unknown";
+}
+
+std::optional<DiagnosticCategory> parse_category(std::string_view name) {
+  for (const auto category :
+       {DiagnosticCategory::StaleGeneration, DiagnosticCategory::IncompatibleSemanticReuse,
+        DiagnosticCategory::WriteThroughSharedImmutableState,
+        DiagnosticCategory::PrematureReclaim, DiagnosticCategory::OrphanedOperation,
+        DiagnosticCategory::DoubleCompletion, DiagnosticCategory::InvalidStateTransition,
+        DiagnosticCategory::IncompleteEvidence, DiagnosticCategory::MalformedTrace}) {
+    if (to_string(category) == name) return category;
+  }
+  return std::nullopt;
 }
 
 }  // namespace stateguard

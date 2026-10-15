@@ -76,12 +76,16 @@ struct AllocateEvent {
   Generation generation = 0;
   std::uint64_t bytes = 0;
   std::string domain;
+
+  bool operator==(const AllocateEvent&) const = default;
 };
 
 struct BindStateEvent {
   AllocationRef allocation;
   StateId state;
   SemanticDescriptor descriptor;
+
+  bool operator==(const BindStateEvent&) const = default;
 };
 
 struct SubmitEvent {
@@ -89,12 +93,16 @@ struct SubmitEvent {
   RequestId request;
   std::vector<Lease> leases;
   std::vector<OperationId> dependencies;
+
+  bool operator==(const SubmitEvent&) const = default;
 };
 
 struct PublishEvent {
   StateId state;
   AllocationRef allocation;
   std::optional<OperationId> completed_operation;
+
+  bool operator==(const PublishEvent&) const = default;
 };
 
 struct ConsumeEvent {
@@ -102,30 +110,44 @@ struct ConsumeEvent {
   StateId state;
   AllocationRef allocation;
   SemanticDescriptor expected;
+
+  bool operator==(const ConsumeEvent&) const = default;
 };
 
 struct CancelRequestEvent {
   RequestId request;
+
+  bool operator==(const CancelRequestEvent&) const = default;
 };
 
 struct CompleteAccessEvent {
   OperationId operation;
+
+  bool operator==(const CompleteAccessEvent&) const = default;
 };
 
 struct RetireEvent {
   AllocationRef allocation;
+
+  bool operator==(const RetireEvent&) const = default;
 };
 
 struct ReclaimEvent {
   AllocationRef allocation;
+
+  bool operator==(const ReclaimEvent&) const = default;
 };
 
 struct CoverageGapEvent {
   std::string reason;
+
+  bool operator==(const CoverageGapEvent&) const = default;
 };
 
 struct EndTraceEvent {
   bool capture_complete = false;
+
+  bool operator==(const EndTraceEvent&) const = default;
 };
 
 using Event = std::variant<AllocateEvent, BindStateEvent, SubmitEvent,
