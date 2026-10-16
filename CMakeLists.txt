@@ -6,6 +6,7 @@ option(STATEGUARD_BUILD_TESTS "Build the CPU checker tests" ON)
 option(STATEGUARD_BUILD_EXAMPLES "Build the instrumented CPU example" ON)
 
 add_library(stateguard
+  src/capture.cpp
   src/checker.cpp
   src/generator.cpp
   src/reducer.cpp
@@ -28,22 +29,44 @@ foreach(tool check generate reduce)
   target_link_libraries(stateguard-${tool} PRIVATE stateguard::stateguard)
 endforeach()
 
+# Instrumented allocator and async-copy harness used by the demo and tests.
+if(STATEGUARD_BUILD_EXAMPLES OR STATEGUARD_BUILD_TESTS)
+  add_library(stateguard-async-copy STATIC harness/async_copy.cpp)
+  target_include_directories(stateguard-async-copy PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/harness)
+  target_link_libraries(stateguard-async-copy PUBLIC stateguard::stateguard)
+  target_compile_options(stateguard-async-copy PRIVATE
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+  )
+endif()
+
 if(STATEGUARD_BUILD_EXAMPLES)
   add_executable(stateguard-instrumented-demo examples/instrumented_demo.cpp)
   target_link_libraries(stateguard-instrumented-demo PRIVATE stateguard::stateguard)
+  add_executable(stateguard-async-copy-demo examples/async_copy_demo.cpp)
+  target_link_libraries(stateguard-async-copy-demo PRIVATE stateguard-async-copy)
 endif()
 
 if(STATEGUARD_BUILD_TESTS)
   enable_testing()
+  # Links the core library, or the libraries listed after the source.
   function(stateguard_add_test_suite target source)
     add_executable(${target} ${source})
-    target_link_libraries(${target} PRIVATE stateguard::stateguard)
+    if(ARGN)
+      target_link_libraries(${target} PRIVATE ${ARGN})
+    else()
+      target_link_libraries(${target} PRIVATE stateguard::stateguard)
+    endif()
     target_compile_definitions(${target} PRIVATE
       STATEGUARD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME ${target} COMMAND ${target})
   endfunction()
   stateguard_add_test_suite(stateguard-tests tests/test_main.cpp)
   stateguard_add_test_suite(stateguard-generate-reduce-tests tests/test_generate_reduce.cpp)
+  if(TARGET stateguard-async-copy)
+    stateguard_add_test_suite(stateguard-async-copy-tests tests/test_async_copy.cpp
+      stateguard-async-copy)
+  endif()
 
   # End-to-end CLI workflow: generate a faulted trace, check it, reduce it, and
   # check that the reduced witness still reports the same failure.
@@ -72,4 +95,27 @@ if(STATEGUARD_BUILD_TESTS)
   add_test(NAME cli-reduce-clean-trace
     COMMAND stateguard-reduce ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/safe_deferred_reclaim.sgtrace)
   set_tests_properties(cli-reduce-clean-trace PROPERTIES WILL_FAIL TRUE)
+
+  # Harness workflow: capture traces from the instrumented async-copy demo,
+  # then check and reduce them with the offline tools.
+  if(STATEGUARD_BUILD_EXAMPLES)
+    add_test(NAME async-copy-demo
+      COMMAND stateguard-async-copy-demo --trace-dir ${cli_dir})
+    set_tests_properties(async-copy-demo PROPERTIES FIXTURES_SETUP harness_traces)
+    add_test(NAME cli-check-harness-safe
+      COMMAND stateguard-check ${cli_dir}/safe.sgtrace)
+    set_tests_properties(cli-check-harness-safe PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "^clean\n$")
+    add_test(NAME cli-check-harness-immediate
+      COMMAND stateguard-check ${cli_dir}/immediate.sgtrace)
+    set_tests_properties(cli-check-harness-immediate PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+    add_test(NAME cli-reduce-harness-immediate
+      COMMAND stateguard-reduce ${cli_dir}/immediate.sgtrace)
+    set_tests_properties(cli-reduce-harness-immediate PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "premature_reclaim")
+  endif()
 endif()
