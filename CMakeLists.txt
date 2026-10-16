@@ -4,6 +4,7 @@ project(stateguard VERSION 0.1.0 LANGUAGES CXX)
 
 option(STATEGUARD_BUILD_TESTS "Build the CPU checker tests" ON)
 option(STATEGUARD_BUILD_EXAMPLES "Build the instrumented CPU example" ON)
+option(STATEGUARD_ENABLE_CUDA "Build the optional CUDA copy harness and demo" OFF)
 
 add_library(stateguard
   src/capture.cpp
@@ -38,6 +39,24 @@ if(STATEGUARD_BUILD_EXAMPLES OR STATEGUARD_BUILD_TESTS)
     $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
   )
+endif()
+
+# Optional CUDA variant of the harness. It needs the CUDA toolkit and runtime
+# but no CUDA compiler: it calls the runtime API from ordinary C++. The core
+# library never includes CUDA headers.
+if(STATEGUARD_ENABLE_CUDA)
+  if(NOT TARGET stateguard-async-copy)
+    message(FATAL_ERROR "STATEGUARD_ENABLE_CUDA needs examples or tests enabled")
+  endif()
+  find_package(CUDAToolkit REQUIRED)
+  add_library(stateguard-cuda-copy STATIC harness/cuda_copy.cpp)
+  target_link_libraries(stateguard-cuda-copy PUBLIC stateguard-async-copy PRIVATE CUDA::cudart)
+  target_compile_options(stateguard-cuda-copy PRIVATE
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+  )
+  add_executable(stateguard-cuda-copy-demo examples/cuda_copy_demo.cpp)
+  target_link_libraries(stateguard-cuda-copy-demo PRIVATE stateguard-cuda-copy)
 endif()
 
 if(STATEGUARD_BUILD_EXAMPLES)
@@ -117,5 +136,27 @@ if(STATEGUARD_BUILD_TESTS)
     set_tests_properties(cli-reduce-harness-immediate PROPERTIES
       FIXTURES_REQUIRED harness_traces
       PASS_REGULAR_EXPRESSION "premature_reclaim")
+  endif()
+
+  # GPU workflow: these tests need a CUDA device and fail without one.
+  if(TARGET stateguard-cuda-copy-demo)
+    add_test(NAME cuda-copy-demo
+      COMMAND stateguard-cuda-copy-demo --repeat 5 --trace-dir ${cli_dir})
+    set_tests_properties(cuda-copy-demo PROPERTIES
+      FIXTURES_SETUP cuda_traces TIMEOUT 120 LABELS gpu)
+    foreach(name safe safe-delayed)
+      add_test(NAME cli-check-cuda-${name}
+        COMMAND stateguard-check ${cli_dir}/cuda-${name}.sgtrace)
+      set_tests_properties(cli-check-cuda-${name} PROPERTIES
+        FIXTURES_REQUIRED cuda_traces LABELS gpu
+        PASS_REGULAR_EXPRESSION "^clean\n$")
+    endforeach()
+    foreach(name immediate immediate-delayed)
+      add_test(NAME cli-check-cuda-${name}
+        COMMAND stateguard-check ${cli_dir}/cuda-${name}.sgtrace)
+      set_tests_properties(cli-check-cuda-${name} PROPERTIES
+        FIXTURES_REQUIRED cuda_traces LABELS gpu
+        PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+    endforeach()
   endif()
 endif()
