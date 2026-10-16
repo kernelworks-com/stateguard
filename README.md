@@ -9,8 +9,10 @@ or allocation involved.
 
 **Available today:** an experimental C++ CPU checker, a trace CLI, a reducer that
 shrinks a failing trace to a small witness, a deterministic generator of synthetic
-lifecycle histories, and examples. It runs locally without a GPU. Connecting it to a serving engine requires
-instrumentation; there is no ready-made engine adapter yet.
+lifecycle histories, a bounded event recorder for instrumented code, and an
+instrumented CPU buffer-pool and async-copy harness. It runs locally without a GPU.
+Connecting it to a serving engine requires instrumentation; there is no ready-made
+engine adapter yet.
 
 ## Try a safe trace and a broken one
 
@@ -126,11 +128,46 @@ constructs events and runs the checker. Run it with:
 ```
 
 For integration, emit typed events through the [public headers](include/stateguard/stateguard.hpp)
-or follow the [trace fixtures](tests/fixtures). The [technical reference](docs/REFERENCE.md)
-explains descriptors, publication proofs, cancellation, and trace coverage.
+or follow the [trace fixtures](tests/fixtures). `stateguard::TraceRecorder` collects
+events from running code into a fixed-size buffer and marks any events it had to
+drop, so a capture that overflows is never reported `clean`. The
+[technical reference](docs/REFERENCE.md) explains descriptors, publication proofs,
+cancellation, and trace coverage.
 
-CUDA, RDMA/NIXL, serving-engine adapters, and timeline reporting are future work. Stateguard diagnoses recorded events; it does not prevent a device
-from writing to memory.
+## Catch a reclaim bug in running code
+
+The [async-copy harness](harness/async_copy.hpp) is a small buffer pool, a copy
+engine whose completions you control, and a cache host that shares one prefix
+between two requests. It records its own events while it runs. The demo runs it
+with a safe policy and with a deliberate bug: buffers are reclaimed as soon as the
+host releases them, even while a copy still reads them.
+
+```sh
+./build/stateguard-async-copy-demo --trace-dir build
+```
+
+Its output starts with:
+
+```text
+safe deferred reclamation: clean
+  capture: 37 events kept, 0 dropped, capacity 1024; access completion recorded by the engine
+  harness: 0 unsafe reclaims; request-2 received prefix-1 intact
+induced immediate reclamation: violation
+  first finding: 5 premature_reclaim: allocation reclaimed while obligations remain (operation lease is still active)
+    allocation=slot-0
+    generation=1
+```
+
+In the buggy run, request-2 really receives the wrong bytes, and the checker
+names the first buffer that was reclaimed too early. Two more runs show lost
+coverage: a capture buffer that fills up, and a copy engine that cannot report when
+a copy finished. Both are `inconclusive`. The demo writes each trace to
+`build/<name>.sgtrace`. Run `./build/stateguard-reduce build/immediate.sgtrace` to
+shrink the buggy run to a 7-event witness.
+
+The harness runs on the CPU. CUDA, RDMA/NIXL, serving-engine adapters, and
+timeline reporting are future work. Stateguard diagnoses recorded events; it does
+not prevent a device from writing to memory.
 
 ## Tests and feedback
 

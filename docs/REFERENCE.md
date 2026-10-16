@@ -138,6 +138,88 @@ the checker to report only that fault, at the planted event:
 Generated histories are synthetic. They test the checker's model; they do not
 show how any engine behaves or how often these failures occur in practice.
 
+## Capturing events from native code
+
+`stateguard::TraceRecorder` (in `capture.hpp`) collects events from instrumented
+code and produces a trace for the checker:
+
+- **Bounded memory.** The recorder reserves room for `capacity` events up front.
+  The first event that does not fit, and every event after it, is dropped and
+  counted. `finish()` then records a `coverage_gap` at that point and the end
+  marker. Findings before the gap stay confirmed; the trace is never `clean`.
+- **Order.** The trace order is the order of `record()` calls. Record an event
+  before its effect becomes visible: record an access completion before the
+  notification that lets the host release memory, and record a reclaim before
+  the memory can be handed out again.
+- **Reentrancy.** `record()` never calls back into instrumented code. Its storage
+  uses the standard allocator, so it cannot instrument `operator new` or `malloc`
+  themselves.
+- **Threads.** The recorder is not thread-safe. Capture from one thread, or
+  serialize calls in an order that follows the rule above. Instrumentation can
+  change the timing of the code it observes.
+
+An adapter that cannot observe part of the lifecycle should record its own
+`coverage_gap` before the affected events. Findings after the gap are then
+`[unconfirmed]` instead of being reported as violations.
+
+## Async-copy harness
+
+`harness/async_copy.hpp` is a small instrumented native program, built as the
+`stateguard-async-copy` library for the demo and tests:
+
+- `BufferPool` is a fixed-size slab allocator. Each slot is one allocation
+  identity, reuse increments its generation, and freed slots are reused last
+  in, first out. Host access goes through checked handles, so the pool rejects a
+  stale generation itself. It records `allocate`, `retire`, and `reclaim`.
+- `CopyEngine` copies between buffers asynchronously. It resolves both addresses
+  when a copy is submitted, as a device would, and copies only when the caller
+  completes the operation. Its completion contract: it copies, records
+  `complete`, and only then posts a notification. A recorded completion
+  therefore proves that the copy no longer touches either buffer. Notifications
+  can be delivered twice. An engine configured without completion reporting
+  records a coverage gap instead.
+- `CacheHost` loads staged bytes into cache buffers, publishes a state when its
+  load is notified, lets requests consume and copy out shared state, and releases
+  buffers. With the deferred policy, a released buffer is reclaimed once every
+  copy that touches it has been notified and every consuming request has ended.
+  The immediate policy reclaims at once. That is the induced bug. A host that
+  counts every repeated notification as a release is a second induced bug.
+
+The scenario stages two prefixes and loads them. Two requests share prefix-1
+and copy it out. One request is cancelled while its copy may still be running,
+and prefix-1 is evicted while the other request still uses it. A new staging
+buffer then takes the most recently freed slot. `explore_scenario` runs every
+schedule: at each point, the host takes its next step, processes queued
+notifications, or one pending copy completes. Host steps that wait for a
+notification are never moved ahead of it, so no synchronization edge is
+removed. Each configuration has 15,982 schedules.
+
+The harness also records which reclaims were unsafe from its own state: a copy
+was still pending in the engine, or a request still consumed the buffer. The
+checker sees only events. The tests require the two to agree on every schedule:
+
+| Configuration | Result |
+|---|---|
+| Deferred reclaim | `clean` in every schedule, and request-2's bytes are intact |
+| Immediate reclaim | `violation` in every schedule; bytes corrupted in 5,594 |
+| Repeated notifications counted as releases | `violation` in exactly the 13,278 schedules with an unsafe reclaim |
+| Repeated notifications ignored | `clean` in every schedule |
+| Capture buffer of 16 events | never `clean`; a `violation` only for an unsafe reclaim captured before the gap |
+| Engine without completion reporting | `inconclusive` in every schedule |
+
+For each violation, the first confirmed finding is `premature_reclaim` for the
+first unsafe reclaim, with the matching reason (active lease or live consumer).
+After that finding, the checker reports follow-on errors: the slot is reused while
+the checker still treats the old generation as live. Run `stateguard-reduce` to
+get a witness for the first failure.
+
+Limits: the harness runs on the CPU in one thread, and its schedules are the
+completion and notification orders of one fixed scenario. It does not show that
+CUDA, RDMA, NIXL, or any serving engine emits faithful events. Requests end with
+`cancel`, because the event vocabulary has no separate event for a finished
+request. A copy cannot fail in this harness. No event records a failed transfer
+yet, so publishing the result of a failed write is not detected.
+
 ## Scope and limitations
 
 Stateguard is a diagnostic tool, not a proof that every inference result
