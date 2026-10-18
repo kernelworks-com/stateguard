@@ -104,6 +104,12 @@ mentions one identity, loses the failure. It is not guaranteed to be the
 smallest possible witness. `--max-checks` limits the number of checker runs; when
 the limit is reached, the summary says so and the best trace so far is returned.
 
+The reduced trace goes to standard output (or `--output FILE`) and a summary
+(target, event counts, kept original indices) to standard error. The command
+exits with 0 after a reduction, 1 if the trace has no failure to reduce, and 3
+for an input error. For example, `stateguard-reduce
+tests/fixtures/premature_reclaim.sgtrace` reduces 6 events to 5.
+
 A reduced trace is a checker witness under the current checker version. It does
 not show that an engine reproduces the failure when replayed.
 
@@ -118,9 +124,14 @@ retirement notifications. The generator uses its own SplitMix64 sequence instead
 of standard library distributions, so a seed gives the same trace on every
 platform.
 
-`--fault NAME` plants one violation in the history. It is placed where its
-precondition holds, and the rest of the history stays legal. The tests require
-the checker to report only that fault, at the planted event:
+```sh
+./build/stateguard-generate --seed 7 --fault premature_reclaim --output generated.sgtrace
+```
+
+`--fault NAME` plants one violation in the history (`--list-faults` prints the
+names). It is placed where its precondition holds, and the rest of the history
+stays legal. The tests require the checker to report only that fault, at the
+planted event:
 
 | Fault | Expected result |
 |---|---|
@@ -219,6 +230,42 @@ CUDA, RDMA, NIXL, or any serving engine emits faithful events. Requests end with
 `cancel`, because the event vocabulary has no separate event for a finished
 request. A copy cannot fail in this harness. No event records a failed transfer
 yet, so publishing the result of a failed write is not detected.
+
+## CUDA copy harness
+
+`harness/cuda_copy.hpp` is built only with `-DSTATEGUARD_ENABLE_CUDA=ON`. It calls
+the CUDA runtime API from ordinary C++, so it needs the toolkit but not a CUDA
+compiler, and the core library never includes CUDA headers.
+
+- `DevicePool` holds `cudaMalloc` slots with the same identities, generation
+  increments, last-in-first-out reuse, and stale-handle checks as `BufferPool`.
+  Its allocations are recorded in domain `cuda-<device>`.
+- `CudaCopyEngine` enqueues `cudaMemcpyAsync` on its own stream and records a CUDA
+  event after each copy. Its completion contract: `complete` is recorded only
+  after `cudaEventQuery` or `cudaEventSynchronize` reports that event complete,
+  and only then is the host notified. Submission or a host timeout is never
+  treated as completion.
+- `run_gpu_scenario` loads a staged prefix into a cache buffer, releases the
+  staging buffer, and restages the freed slot with `cudaMemsetAsync` on a second
+  stream that does not wait for the copy. Deferred reclamation waits for the
+  copy's completion; immediate reclamation does not. An optional host function
+  delays the copy's start so that it reliably overlaps the restaging.
+
+`stateguard-cuda-copy-demo` repeats each configuration and requires `clean` for
+deferred and `premature_reclaim` for immediate reclamation on every run. Whether
+the device delivered corrupt bytes is reported but not required. CTest runs it and
+checks its traces under the `gpu` label; those tests need a CUDA device.
+
+Checked on 2026-10-16: Tesla T4 (compute 7.5), driver 580.82.07, CUDA 13.0, GCC
+13.3 on Ubuntu 24.04, 17/17 CTest. With 64 MiB copies and 20 runs per
+configuration, the verdicts matched on every run. Without a start delay the copy
+finished before the restaging write in all 20 immediate runs, so the bytes stayed
+intact. With a 20 ms delay every immediate run corrupted all 64 MiB. The checker
+reported the unsafe reclaim in both cases.
+
+Limits: this is one GPU, driver, and toolkit on a shared cloud machine. The
+harness emits its own events, so the result does not show that another CUDA
+program, RDMA, NIXL, or a serving engine emits faithful events.
 
 ## Scope and limitations
 
