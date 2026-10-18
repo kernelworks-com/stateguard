@@ -1,0 +1,9 @@
+STATEGUARD_TRACE|1
+allocate|buffer-1|1|4096|cpu
+submit|copy-1|request-1|r:buffer-1:1|
+cancel|request-1
+expire|copy-1|lease-expired
+retire|buffer-1|1
+reclaim|buffer-1|1
+complete|copy-1
+end|complete

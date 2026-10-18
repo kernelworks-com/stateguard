@@ -32,12 +32,14 @@ struct AllocationIdTag;
 struct OperationIdTag;
 struct RequestIdTag;
 struct NamespaceIdTag;
+struct EndpointIdTag;
 
 using StateId = Identifier<StateIdTag>;
 using AllocationId = Identifier<AllocationIdTag>;
 using OperationId = Identifier<OperationIdTag>;
 using RequestId = Identifier<RequestIdTag>;
 using NamespaceId = Identifier<NamespaceIdTag>;
+using EndpointId = Identifier<EndpointIdTag>;
 using Generation = std::uint64_t;
 
 struct AllocationRef {
@@ -71,6 +73,17 @@ struct Lease {
   auto operator<=>(const Lease&) const = default;
 };
 
+// The backend transfer an operation was handed to: a transport endpoint, the
+// endpoint's connection epoch, and the backend's own tag for the transfer.
+// Completion evidence from the backend names the same route.
+struct TransferRoute {
+  EndpointId endpoint;
+  std::uint64_t epoch = 0;
+  std::string tag;
+
+  auto operator<=>(const TransferRoute&) const = default;
+};
+
 struct AllocateEvent {
   AllocationId allocation;
   Generation generation = 0;
@@ -93,6 +106,8 @@ struct SubmitEvent {
   RequestId request;
   std::vector<Lease> leases;
   std::vector<OperationId> dependencies;
+  // Set when the backend reports completions with transfer evidence.
+  std::optional<TransferRoute> route{};
 
   bool operator==(const SubmitEvent&) const = default;
 };
@@ -128,8 +143,30 @@ enum class AccessOutcome { Succeeded, Failed };
 struct CompleteAccessEvent {
   OperationId operation;
   AccessOutcome outcome = AccessOutcome::Succeeded;
+  // The transfer the backend's completion named. It must match the
+  // operation's route; otherwise the completion belongs to another transfer.
+  std::optional<TransferRoute> evidence{};
 
   bool operator==(const CompleteAccessEvent&) const = default;
+};
+
+// A transport endpoint started a new connection epoch, ending the previous
+// one. A new epoch does not prove that transfers of an earlier epoch ended.
+struct ConnectEndpointEvent {
+  EndpointId endpoint;
+  std::uint64_t epoch = 0;
+
+  bool operator==(const ConnectEndpointEvent&) const = default;
+};
+
+// The host gave up waiting for an operation: a lease expired, a timeout
+// fired, or a peer disconnected. The operation's leases stay held, because
+// giving up does not prove that the access ended.
+struct ExpireOperationEvent {
+  OperationId operation;
+  std::string reason;
+
+  bool operator==(const ExpireOperationEvent&) const = default;
 };
 
 struct RetireEvent {
@@ -159,7 +196,8 @@ struct EndTraceEvent {
 using Event = std::variant<AllocateEvent, BindStateEvent, SubmitEvent,
                            PublishEvent, ConsumeEvent, CancelRequestEvent,
                            CompleteAccessEvent, RetireEvent, ReclaimEvent,
-                           CoverageGapEvent, EndTraceEvent>;
+                           CoverageGapEvent, EndTraceEvent, ConnectEndpointEvent,
+                           ExpireOperationEvent>;
 
 struct Trace {
   static constexpr std::uint32_t schema_major = 1;

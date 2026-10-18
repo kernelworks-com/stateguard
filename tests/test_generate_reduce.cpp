@@ -425,7 +425,19 @@ void test_reduction_of_fixtures() {
   require(stale_result.kept_events == std::vector<std::size_t>({5, 8, 9}),
           "unexpected stale_generation witness");
 
-  for (const char* name : {"incompatible_semantics.sgtrace", "write_shared_state.sgtrace"}) {
+  // A misattributed completion needs the attempt whose evidence it carries:
+  // that attempt's routed submission and the endpoint connection stay. The
+  // state binding and the rejected publication do not.
+  const auto retry = parse_trace(fixture("retry_acknowledges_other_attempt.sgtrace"));
+  const auto retry_result = reduce_trace(retry);
+  require_valid_reduction(retry, retry_result, "retry fixture");
+  require(retry_result.target.category == DiagnosticCategory::MisattributedCompletion,
+          "retry fixture targeted the wrong category");
+  require(retry_result.kept_events == std::vector<std::size_t>({0, 1, 2, 4, 5, 6, 7, 8, 10, 11}),
+          "unexpected retry witness");
+
+  for (const char* name : {"incompatible_semantics.sgtrace", "write_shared_state.sgtrace",
+                           "stale_epoch_notification.sgtrace", "expired_lease_reclaim.sgtrace"}) {
     const auto trace = parse_trace(fixture(name));
     require_valid_reduction(trace, reduce_trace(trace), name);
   }

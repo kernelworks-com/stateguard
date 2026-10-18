@@ -1,5 +1,7 @@
 #include "stateguard/stateguard.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -409,6 +411,201 @@ void test_failed_writes() {
   }
 }
 
+const Diagnostic* first_finding(const CheckReport& report) {
+  for (const auto& diagnostic : report.diagnostics) {
+    if (diagnostic.category != DiagnosticCategory::IncompleteEvidence) return &diagnostic;
+  }
+  return nullptr;
+}
+
+std::size_t count_category(const CheckReport& report, DiagnosticCategory category) {
+  return static_cast<std::size_t>(
+      std::count_if(report.diagnostics.begin(), report.diagnostics.end(),
+                    [category](const Diagnostic& d) { return d.category == category; }));
+}
+
+TransferRoute route(const char* endpoint, std::uint64_t epoch, const char* tag) {
+  return TransferRoute{EndpointId(endpoint), epoch, tag};
+}
+
+// buffer-1 is read by copy-1 over peer-a epoch 1 as `submitted`, then the
+// given events run, then buffer-1 is retired and reclaimed.
+Trace routed_copy(TransferRoute submitted, std::vector<Event> middle) {
+  const AllocationRef buffer{AllocationId("buffer-1"), 1};
+  Trace trace;
+  trace.events = {ConnectEndpointEvent{EndpointId("peer-a"), 1},
+                  AllocateEvent{buffer.allocation, buffer.generation, 4096, "cpu"},
+                  SubmitEvent{OperationId("copy-1"), RequestId("request-1"),
+                              {Lease{buffer, AccessKind::Read}}, {}, submitted}};
+  for (auto& event : middle) trace.events.push_back(std::move(event));
+  trace.events.push_back(RetireEvent{buffer});
+  trace.events.push_back(ReclaimEvent{buffer});
+  trace.events.push_back(EndTraceEvent{true});
+  return trace;
+}
+
+void test_retirement_checks() {
+  require(fixture_report("routed_reconnect_clean.sgtrace").clean(),
+          "a late completion carrying its own transfer's evidence must be clean");
+
+  const auto stale = fixture_report("stale_epoch_notification.sgtrace");
+  const auto* stale_first = first_finding(stale);
+  require(stale.status == CheckStatus::Violation && stale_first != nullptr &&
+              stale_first->category == DiagnosticCategory::MisattributedCompletion &&
+              stale_first->event_index == 7 &&
+              stale_first->message.find("epoch 1, but send-2 was submitted in epoch 2") !=
+                  std::string::npos,
+          "a stale-epoch notification must be the first finding");
+  require(has_category(stale, DiagnosticCategory::PrematureReclaim),
+          "a misattributed completion must not release the operation's lease");
+
+  const auto retry = fixture_report("retry_acknowledges_other_attempt.sgtrace");
+  const auto* retry_first = first_finding(retry);
+  require(retry.status == CheckStatus::Violation && retry_first != nullptr &&
+              retry_first->category == DiagnosticCategory::MisattributedCompletion &&
+              retry_first->message.find("evidence of operation load-1") != std::string::npos,
+          "a retry acknowledged by the first attempt's completion must be flagged");
+
+  const auto expired = fixture_report("expired_lease_reclaim.sgtrace");
+  require(expired.status == CheckStatus::Violation && expired.diagnostics.size() == 1 &&
+              expired.diagnostics[0].category == DiagnosticCategory::PrematureReclaim &&
+              expired.diagnostics[0].message.find("copy-1 expired: lease-expired") !=
+                  std::string::npos,
+          "a reclaim after an expired lease must be premature and say why");
+
+  const auto missing = fixture_report("missing_completion_evidence.sgtrace");
+  require(missing.status == CheckStatus::Inconclusive && missing.diagnostics.size() == 1 &&
+              missing.diagnostics[0].category == DiagnosticCategory::IncompleteEvidence,
+          "a routed completion without evidence must be inconclusive, not clean");
+
+  const auto own = route("peer-a", 1, "1");
+  const auto done = [&own](const char* operation) {
+    return CompleteAccessEvent{OperationId(operation), AccessOutcome::Succeeded, own};
+  };
+  require(check(routed_copy(own, {done("copy-1")})).clean(), "matching evidence must be clean");
+
+  // A reconnect alone does not end the old epoch's transfer.
+  const auto reconnected =
+      check(routed_copy(own, {ConnectEndpointEvent{EndpointId("peer-a"), 2}}));
+  require(reconnected.status == CheckStatus::Violation &&
+              reconnected.diagnostics[0].category == DiagnosticCategory::PrematureReclaim &&
+              reconnected.diagnostics[0].message.find("endpoint peer-a is now in epoch 2") !=
+                  std::string::npos,
+          "a reclaim after a reconnect must be premature and name the new epoch");
+  // Neither does expiry; a later completion is still accepted.
+  require(check(routed_copy(own, {ExpireOperationEvent{OperationId("copy-1"), "timeout"},
+                                  done("copy-1")}))
+              .clean(),
+          "a completion after expiry must release the lease");
+  const auto unresolved = check(routed_copy(
+      own, {ExpireOperationEvent{OperationId("copy-1"), "timeout"}}));
+  require(unresolved.status == CheckStatus::Violation &&
+              count_category(unresolved, DiagnosticCategory::IncompleteEvidence) == 1,
+          "an expired operation without completion must stay unresolved");
+
+  const auto category_of = [](const Trace& trace) {
+    const auto report = check(trace);
+    const auto* finding = first_finding(report);
+    return finding == nullptr ? std::nullopt
+                              : std::optional<DiagnosticCategory>(finding->category);
+  };
+  const auto misattributed = DiagnosticCategory::MisattributedCompletion;
+  const auto invalid = DiagnosticCategory::InvalidStateTransition;
+  require(category_of(routed_copy(own, {CompleteAccessEvent{
+                                           OperationId("copy-1"), AccessOutcome::Succeeded,
+                                           route("peer-b", 1, "1")}})) == misattributed,
+          "evidence from another endpoint must be misattributed");
+  require(category_of(routed_copy(own, {done("copy-1"), done("copy-1")})) ==
+              DiagnosticCategory::DoubleCompletion,
+          "a repeated notification for the same transfer is a double completion");
+  require(category_of(routed_copy(own, {})) ==
+              DiagnosticCategory::PrematureReclaim,
+          "a routed operation without completion keeps its lease");
+
+  const auto unrouted = [&]() {
+    auto trace = routed_copy(own, {done("copy-1")});
+    std::get<SubmitEvent>(trace.events[2]).route.reset();
+    return trace;
+  }();
+  require(category_of(unrouted) == invalid,
+          "evidence for an operation without a route must be rejected");
+
+  for (const auto& [submitted, why] : std::vector<std::pair<TransferRoute, const char*>>{
+           {route("peer-b", 1, "1"), "an unconnected endpoint"},
+           {route("peer-a", 2, "1"), "an epoch that is not current"},
+           {route("peer-a", 0, "1"), "a zero epoch"},
+           {route("peer-a", 1, ""), "an empty tag"}}) {
+    require(category_of(routed_copy(submitted, {})) == invalid,
+            std::string("submission on ") + why + " must be rejected");
+  }
+  auto duplicate_route = routed_copy(own, {});
+  duplicate_route.events.insert(
+      duplicate_route.events.begin() + 3,
+      SubmitEvent{OperationId("copy-2"), RequestId("request-2"),
+                  {Lease{AllocationRef{AllocationId("buffer-1"), 1}, AccessKind::Read}},
+                  {}, own});
+  require(has_category(check(duplicate_route), invalid),
+          "two operations must not share a transfer route");
+
+  Trace epochs;
+  epochs.events = {ConnectEndpointEvent{EndpointId("peer-a"), 2},
+                   ConnectEndpointEvent{EndpointId("peer-a"), 2},
+                   ConnectEndpointEvent{EndpointId("peer-b"), 0},
+                   ExpireOperationEvent{OperationId("unknown"), "timeout"},
+                   EndTraceEvent{true}};
+  const auto epoch_report = check(epochs);
+  require(count_category(epoch_report, invalid) == 2 &&
+              count_category(epoch_report, DiagnosticCategory::OrphanedOperation) == 1,
+          "epochs must increase and expiry must name a known operation");
+
+  // Every new fixture round-trips byte for byte, so the encoding is canonical.
+  for (const char* name : {"routed_reconnect_clean.sgtrace", "stale_epoch_notification.sgtrace",
+                           "retry_acknowledges_other_attempt.sgtrace",
+                           "expired_lease_reclaim.sgtrace",
+                           "missing_completion_evidence.sgtrace"}) {
+    require(serialize_trace(parse_trace(fixture(name))) == fixture(name),
+            std::string("fixture did not round-trip: ") + name);
+  }
+  const auto failed_routed = parse_trace(
+      "STATEGUARD_TRACE|1\ncomplete|op-1|failed|peer-a:1:1\n");
+  require(std::get<CompleteAccessEvent>(failed_routed.events[0]) ==
+              CompleteAccessEvent{OperationId("op-1"), AccessOutcome::Failed,
+                                  route("peer-a", 1, "1")},
+          "a failed completion with evidence must parse");
+  for (const char* line :
+       {"complete|op-1|succeeded|peer-a:1", "complete|op-1|succeeded|peer-a:0:1",
+        "complete|op-1|succeeded|peer-a:x:1", "complete|op-1|succeeded|:1:1",
+        "complete|op-1|succeeded|peer-a:1:", "complete|op-1|succeeded|peer-a:1:1|x",
+        "submit|op-1|r-1|r:b-1:1||peer-a:1", "submit|op-1|r-1|r:b-1:1||peer-a:1:1|x",
+        "connect|peer-a", "connect|peer-a|x", "connect|peer-a|1|2", "expire|op-1",
+        "expire|op-1|", "expire|op-1|timeout|x"}) {
+    bool rejected = false;
+    try {
+      (void)parse_trace(std::string("STATEGUARD_TRACE|1\n") + line + "\n");
+    } catch (const TraceParseError&) {
+      rejected = true;
+    }
+    require(rejected, std::string("malformed retirement event accepted: ") + line);
+  }
+  for (const Event& event : std::vector<Event>{
+           ConnectEndpointEvent{EndpointId("peer:a"), 1},
+           ConnectEndpointEvent{EndpointId("peer-a"), 0},
+           ExpireOperationEvent{OperationId("op-1"), "time|out"},
+           SubmitEvent{OperationId("op-1"), RequestId("r-1"), {}, {}, route("peer-a", 1, "a:b")},
+           CompleteAccessEvent{OperationId("op-1"), AccessOutcome::Succeeded,
+                               route("peer-a", 0, "1")}}) {
+    Trace trace;
+    trace.events = {event};
+    bool rejected = false;
+    try {
+      (void)serialize_trace(trace);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    require(rejected, "serializer accepted a malformed retirement event");
+  }
+}
+
 void test_round_trip_and_malformed_input() {
   const auto parsed = parse_trace(fixture("shared_prefix.sgtrace"));
   const auto encoded = serialize_trace(parsed);
@@ -448,6 +645,7 @@ int main() {
       {"unknown access kind", test_unknown_access_kind_is_rejected},
       {"failure categories", test_failure_categories},
       {"failed writes", test_failed_writes},
+      {"retirement checks", test_retirement_checks},
       {"round trip and malformed input", test_round_trip_and_malformed_input},
   };
   for (const auto& [name, test] : tests) {

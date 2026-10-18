@@ -37,7 +37,14 @@ struct OperationRecord {
   std::vector<Lease> leases;
   bool completed = false;
   bool failed = false;
+  std::optional<TransferRoute> route;
+  // Why the host stopped waiting for the access, if it did.
+  std::optional<std::string> expired;
 };
+
+std::string route_text(const TransferRoute& route) {
+  return route.endpoint.value + ":" + std::to_string(route.epoch) + ":" + route.tag;
+}
 
 struct Replay {
   std::map<AllocationId, AllocationRecord> allocations;
@@ -45,6 +52,8 @@ struct Replay {
   std::map<StateId, StateRecord> states;
   std::map<OperationId, OperationRecord> operations;
   std::set<RequestId> cancelled;
+  std::map<EndpointId, std::uint64_t> endpoints;  // Current epoch of each endpoint.
+  std::map<TransferRoute, OperationId> routes;
   CheckReport report;
   bool ended = false;
   std::size_t end_index = 0;
@@ -66,6 +75,11 @@ struct Replay {
 
   static bool valid_ref(const AllocationRef& ref) {
     return valid_identifier(ref.allocation.value) && ref.generation != 0;
+  }
+
+  static bool valid_route(const TransferRoute& route) {
+    return valid_identifier(route.endpoint.value) && route.epoch != 0 &&
+           valid_identifier(route.tag);
   }
 
   static bool valid_access_kind(AccessKind access) {
@@ -145,6 +159,26 @@ struct Replay {
       }
     }
     return false;
+  }
+
+  // Why an outstanding operation might look finished to the host although
+  // nothing proves that its access ended. Empty when there is no such reason.
+  std::string unproven_end(const OperationId& operation, const OperationRecord& record) const {
+    std::string reasons;
+    if (record.expired) {
+      reasons += " (operation " + operation.value + " expired: " + *record.expired +
+                 "; expiry does not prove the access ended)";
+    }
+    if (record.route) {
+      const auto endpoint = endpoints.find(record.route->endpoint);
+      if (endpoint != endpoints.end() && endpoint->second > record.route->epoch) {
+        reasons += " (operation " + operation.value + "'s endpoint " +
+                   record.route->endpoint.value + " is now in epoch " +
+                   std::to_string(endpoint->second) +
+                   "; a new epoch does not prove the transfer ended)";
+      }
+    }
+    return reasons;
   }
 
   void event(const Event& event, std::size_t index) {
@@ -275,10 +309,43 @@ struct Replay {
         valid = false;
       }
     }
+    if (event.route && !route_accepted(*event.route, index)) valid = false;
     if (valid) {
       operations.emplace(event.operation,
-                         OperationRecord{event.request, event.leases, false});
+                         OperationRecord{event.request, event.leases, false, false,
+                                         event.route, std::nullopt});
+      if (event.route) routes.emplace(*event.route, event.operation);
     }
+  }
+
+  bool route_accepted(const TransferRoute& route, std::size_t index) {
+    if (!valid_route(route)) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "operation has an empty or malformed transfer route");
+      return false;
+    }
+    const auto endpoint = endpoints.find(route.endpoint);
+    if (endpoint == endpoints.end()) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "operation submitted on endpoint " + route.endpoint.value +
+                     ", which has not connected");
+      return false;
+    }
+    if (endpoint->second != route.epoch) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "operation submitted on endpoint " + route.endpoint.value + " epoch " +
+                     std::to_string(route.epoch) + ", but its current epoch is " +
+                     std::to_string(endpoint->second));
+      return false;
+    }
+    const auto owner = routes.find(route);
+    if (owner != routes.end()) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "transfer route " + route_text(route) + " already belongs to operation " +
+                     owner->second.value);
+      return false;
+    }
+    return true;
   }
 
   void apply(const PublishEvent& event, std::size_t index) {
@@ -431,10 +498,19 @@ struct Replay {
                  "completion has an unknown access outcome");
       return;
     }
+    if (event.evidence && !evidence_matches(event, found->second, index)) return;
     if (found->second.completed) {
       diagnostic(DiagnosticCategory::DoubleCompletion, index,
                  "operation " + event.operation.value + " completed more than once");
       return;
+    }
+    if (found->second.route && !event.evidence) {
+      // The completion is accepted, but nothing ties it to this transfer.
+      diagnostic(DiagnosticCategory::IncompleteEvidence, index,
+                 "completion of " + event.operation.value +
+                     " has no backend evidence for transfer " +
+                     route_text(*found->second.route),
+                 {"operation=" + event.operation.value});
     }
     // Either outcome ends the access, so the operation's leases are released.
     // Only the written contents differ: a failed write leaves them incomplete
@@ -453,6 +529,81 @@ struct Replay {
       } else {
         allocation->second.failed_writer.reset();
       }
+    }
+  }
+
+  // A completion whose backend evidence names another transfer proves only
+  // that the other transfer ended. The operation's access stays outstanding.
+  bool evidence_matches(const CompleteAccessEvent& event, const OperationRecord& record,
+                        std::size_t index) {
+    const auto& evidence = *event.evidence;
+    if (!valid_route(evidence)) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "completion has empty or malformed transfer evidence");
+      return false;
+    }
+    if (!record.route) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "completion evidence for " + event.operation.value +
+                     ", which was submitted without a transfer route");
+      return false;
+    }
+    const auto& route = *record.route;
+    if (evidence == route) return true;
+    std::string message = "completion of " + event.operation.value;
+    const auto owner = routes.find(evidence);
+    if (evidence.endpoint == route.endpoint && evidence.epoch < route.epoch) {
+      message += " carries a notification from endpoint " + evidence.endpoint.value +
+                 " epoch " + std::to_string(evidence.epoch) + ", but " +
+                 event.operation.value + " was submitted in epoch " +
+                 std::to_string(route.epoch);
+      if (owner != routes.end()) {
+        message += " (the notification belongs to operation " + owner->second.value + ")";
+      }
+    } else if (owner != routes.end()) {
+      message += " carries the backend evidence of operation " + owner->second.value;
+    } else {
+      message += " carries backend evidence for transfer " + route_text(evidence) +
+                 ", not its own transfer " + route_text(route);
+    }
+    diagnostic(DiagnosticCategory::MisattributedCompletion, index, std::move(message),
+               {"operation=" + event.operation.value, "route=" + route_text(route),
+                "evidence=" + route_text(evidence)});
+    return false;
+  }
+
+  void apply(const ConnectEndpointEvent& event, std::size_t index) {
+    if (!valid_identifier(event.endpoint.value) || event.epoch == 0) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "endpoint connection requires a nonempty identity and nonzero epoch");
+      return;
+    }
+    const auto [endpoint, inserted] = endpoints.try_emplace(event.endpoint, event.epoch);
+    if (inserted) return;
+    if (event.epoch <= endpoint->second) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "endpoint " + event.endpoint.value + " epoch did not increase");
+      return;
+    }
+    endpoint->second = event.epoch;
+  }
+
+  void apply(const ExpireOperationEvent& event, std::size_t index) {
+    if (!valid_identifier(event.operation.value) || !valid_identifier(event.reason)) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "expiry has an empty or malformed operation identity or reason");
+      return;
+    }
+    const auto found = operations.find(event.operation);
+    if (found == operations.end()) {
+      diagnostic(DiagnosticCategory::OrphanedOperation, index,
+                 "expiry references an unknown operation " + event.operation.value);
+      return;
+    }
+    // Expiring a finished operation changes nothing. Otherwise the leases stay:
+    // only a completion proves that the access ended.
+    if (!found->second.completed && !found->second.expired) {
+      found->second.expired = event.reason;
     }
   }
 
@@ -487,6 +638,15 @@ struct Replay {
       std::string message = "allocation reclaimed while obligations remain";
       if (active_access) message += " (operation lease is still active)";
       if (live_consumer) message += " (live consumer remains)";
+      for (const auto& [operation, record] : operations) {
+        if (record.completed) continue;
+        if (std::any_of(record.leases.begin(), record.leases.end(),
+                        [&event](const Lease& lease) {
+                          return lease.allocation == event.allocation;
+                        })) {
+          message += unproven_end(operation, record);
+        }
+      }
       diagnostic(DiagnosticCategory::PrematureReclaim, index, std::move(message),
                  {"allocation=" + event.allocation.allocation.value,
                   "generation=" + std::to_string(event.allocation.generation)});
@@ -528,7 +688,8 @@ struct Replay {
       if (!record.completed) {
         diagnostic(DiagnosticCategory::IncompleteEvidence, end_index,
                    "operation " + operation.value +
-                       " has no observed access completion",
+                       " has no observed access completion" +
+                       unproven_end(operation, record),
                    {"operation=" + operation.value});
       }
     }
@@ -590,6 +751,7 @@ std::string to_string(DiagnosticCategory category) {
     case DiagnosticCategory::OrphanedOperation: return "orphaned_operation";
     case DiagnosticCategory::DoubleCompletion: return "double_completion";
     case DiagnosticCategory::FailedWritePublication: return "failed_write_publication";
+    case DiagnosticCategory::MisattributedCompletion: return "misattributed_completion";
     case DiagnosticCategory::InvalidStateTransition: return "invalid_state_transition";
     case DiagnosticCategory::IncompleteEvidence: return "incomplete_evidence";
     case DiagnosticCategory::MalformedTrace: return "malformed_trace";
@@ -603,7 +765,7 @@ std::optional<DiagnosticCategory> parse_category(std::string_view name) {
         DiagnosticCategory::WriteThroughSharedImmutableState,
         DiagnosticCategory::PrematureReclaim, DiagnosticCategory::OrphanedOperation,
         DiagnosticCategory::DoubleCompletion, DiagnosticCategory::FailedWritePublication,
-        DiagnosticCategory::InvalidStateTransition,
+        DiagnosticCategory::MisattributedCompletion, DiagnosticCategory::InvalidStateTransition,
         DiagnosticCategory::IncompleteEvidence, DiagnosticCategory::MalformedTrace}) {
     if (to_string(category) == name) return category;
   }

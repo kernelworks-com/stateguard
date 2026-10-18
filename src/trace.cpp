@@ -124,6 +124,23 @@ void validate_identifier(std::string_view value, std::string_view field) {
   }
 }
 
+std::string route_field(const TransferRoute& route) {
+  validate_identifier(route.endpoint.value, "route endpoint");
+  validate_identifier(route.tag, "route tag");
+  if (route.epoch == 0) throw std::invalid_argument("route epoch must be nonzero");
+  return route.endpoint.value + ":" + std::to_string(route.epoch) + ":" + route.tag;
+}
+
+TransferRoute parse_route(std::string_view text, std::size_t line) {
+  const auto parts = split(text, ':');
+  require(parts.size() == 3, line, "invalid transfer route");
+  require_token(parts[0], line, "route endpoint");
+  require_token(parts[2], line, "route tag");
+  const auto epoch = parse_uint(parts[1], line, "route epoch");
+  require(epoch != 0, line, "route epoch must be nonzero");
+  return TransferRoute{EndpointId(parts[0]), epoch, parts[2]};
+}
+
 }  // namespace
 
 std::string serialize_trace(const Trace& trace) {
@@ -172,6 +189,8 @@ std::string serialize_trace(const Trace& trace) {
               validate_identifier(e.dependencies[i].value, "dependency");
               out << e.dependencies[i].value;
             }
+            // Without a route, the original five-field form is kept.
+            if (e.route) out << '|' << route_field(*e.route);
             out << '\n';
           } else if constexpr (std::is_same_v<T, PublishEvent>) {
             validate_identifier(e.state.value, "state");
@@ -189,12 +208,15 @@ std::string serialize_trace(const Trace& trace) {
             out << "cancel|" << e.request.value << '\n';
           } else if constexpr (std::is_same_v<T, CompleteAccessEvent>) {
             validate_identifier(e.operation.value, "operation");
-            // A successful completion keeps the original two-field form.
+            // A successful completion without evidence keeps the original
+            // two-field form. Evidence follows an explicit outcome.
             out << "complete|" << e.operation.value;
-            if (e.outcome == AccessOutcome::Failed) out << "|failed";
-            else if (e.outcome != AccessOutcome::Succeeded) {
+            if (e.outcome != AccessOutcome::Failed && e.outcome != AccessOutcome::Succeeded) {
               throw std::invalid_argument("unknown access outcome");
             }
+            if (e.outcome == AccessOutcome::Failed) out << "|failed";
+            else if (e.evidence) out << "|succeeded";
+            if (e.evidence) out << '|' << route_field(*e.evidence);
             out << '\n';
           } else if constexpr (std::is_same_v<T, RetireEvent>) {
             out << "retire|" << ref_fields(e.allocation) << '\n';
@@ -205,6 +227,14 @@ std::string serialize_trace(const Trace& trace) {
             out << "coverage_gap|" << e.reason << '\n';
           } else if constexpr (std::is_same_v<T, EndTraceEvent>) {
             out << "end|" << (e.capture_complete ? "complete" : "incomplete") << '\n';
+          } else if constexpr (std::is_same_v<T, ConnectEndpointEvent>) {
+            validate_identifier(e.endpoint.value, "endpoint");
+            if (e.epoch == 0) throw std::invalid_argument("endpoint epoch must be nonzero");
+            out << "connect|" << e.endpoint.value << '|' << e.epoch << '\n';
+          } else if constexpr (std::is_same_v<T, ExpireOperationEvent>) {
+            validate_identifier(e.operation.value, "operation");
+            validate_identifier(e.reason, "expiry reason");
+            out << "expire|" << e.operation.value << '|' << e.reason << '\n';
           }
         },
         event);
@@ -252,7 +282,8 @@ Trace parse_trace(std::string_view text) {
               AllocationRef{AllocationId(fields[1]), parse_uint(fields[2], line_number, "generation")},
               StateId(fields[3]), parse_descriptor(fields, 4, line_number)});
         } else if (kind == "submit") {
-          require(fields.size() == 5, line_number, "submit has the wrong field count");
+          require(fields.size() == 5 || fields.size() == 6, line_number,
+                  "submit has the wrong field count");
           require_token(fields[1], line_number, "operation");
           require_token(fields[2], line_number, "request");
           SubmitEvent event{OperationId(fields[1]), RequestId(fields[2]), {}, {}};
@@ -274,6 +305,7 @@ Trace parse_trace(std::string_view text) {
               event.dependencies.emplace_back(dependency);
             }
           }
+          if (fields.size() == 6) event.route = parse_route(fields[5], line_number);
           trace.events.emplace_back(std::move(event));
         } else if (kind == "publish") {
           require(fields.size() == 5, line_number, "publish has the wrong field count");
@@ -302,16 +334,19 @@ Trace parse_trace(std::string_view text) {
           require_token(fields[1], line_number, "request");
           trace.events.emplace_back(CancelRequestEvent{RequestId(fields[1])});
         } else if (kind == "complete") {
-          require(fields.size() == 2 || fields.size() == 3, line_number,
+          require(fields.size() >= 2 && fields.size() <= 4, line_number,
                   "complete has the wrong field count");
           require_token(fields[1], line_number, "operation");
           auto outcome = AccessOutcome::Succeeded;
-          if (fields.size() == 3) {
+          if (fields.size() >= 3) {
             require(fields[2] == "failed" || fields[2] == "succeeded", line_number,
                     "invalid completion outcome");
             if (fields[2] == "failed") outcome = AccessOutcome::Failed;
           }
-          trace.events.emplace_back(CompleteAccessEvent{OperationId(fields[1]), outcome});
+          std::optional<TransferRoute> evidence;
+          if (fields.size() == 4) evidence = parse_route(fields[3], line_number);
+          trace.events.emplace_back(
+              CompleteAccessEvent{OperationId(fields[1]), outcome, std::move(evidence)});
         } else if (kind == "retire" || kind == "reclaim") {
           require(fields.size() == 3, line_number, "allocation lifecycle event has the wrong field count");
           require_token(fields[1], line_number, "allocation");
@@ -322,6 +357,17 @@ Trace parse_trace(std::string_view text) {
           require(fields.size() == 2, line_number, "coverage_gap has the wrong field count");
           require_token(fields[1], line_number, "coverage gap reason");
           trace.events.emplace_back(CoverageGapEvent{fields[1]});
+        } else if (kind == "connect") {
+          require(fields.size() == 3, line_number, "connect has the wrong field count");
+          require_token(fields[1], line_number, "endpoint");
+          trace.events.emplace_back(ConnectEndpointEvent{
+              EndpointId(fields[1]), parse_uint(fields[2], line_number, "endpoint epoch")});
+        } else if (kind == "expire") {
+          require(fields.size() == 3, line_number, "expire has the wrong field count");
+          require_token(fields[1], line_number, "operation");
+          require_token(fields[2], line_number, "expiry reason");
+          trace.events.emplace_back(
+              ExpireOperationEvent{OperationId(fields[1]), fields[2]});
         } else if (kind == "end") {
           require(fields.size() == 2, line_number, "end has the wrong field count");
           trace.events.emplace_back(EndTraceEvent{parse_bool(fields[1], line_number)});
