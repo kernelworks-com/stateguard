@@ -120,8 +120,14 @@ struct CancelRequestEvent {
   bool operator==(const CancelRequestEvent&) const = default;
 };
 
+// How an operation's data access ended. Either way the operation no longer
+// touches its leased allocations. A failed write leaves the destination's
+// contents incomplete until a later writer succeeds.
+enum class AccessOutcome { Succeeded, Failed };
+
 struct CompleteAccessEvent {
   OperationId operation;
+  AccessOutcome outcome = AccessOutcome::Succeeded;
 
   bool operator==(const CompleteAccessEvent&) const = default;
 };

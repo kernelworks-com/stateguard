@@ -21,6 +21,9 @@ struct AllocationRecord {
   std::optional<StateId> state;
   std::optional<SemanticDescriptor> descriptor;
   std::set<RequestId> consumers;
+  // The most recent failed writer of this generation, until a later writer
+  // succeeds. The contents are incomplete while it is set.
+  std::optional<OperationId> failed_writer;
 };
 
 struct StateRecord {
@@ -33,6 +36,7 @@ struct OperationRecord {
   RequestId request;
   std::vector<Lease> leases;
   bool completed = false;
+  bool failed = false;
 };
 
 struct Replay {
@@ -174,7 +178,7 @@ struct Replay {
     }
     allocations[event.allocation] =
         AllocationRecord{event.generation, event.bytes, event.domain,
-                         Lifecycle::Reserved, std::nullopt, std::nullopt, {}};
+                         Lifecycle::Reserved, std::nullopt, std::nullopt, {}, std::nullopt};
     last_generation[event.allocation] = event.generation;
   }
 
@@ -318,8 +322,20 @@ struct Replay {
           diagnostic(DiagnosticCategory::InvalidStateTransition, index,
                      "publication completion proof is not an initialization writer for this generation");
           proof_valid = false;
+        } else if (op->second.failed) {
+          failed_publication(event, index, *event.completed_operation,
+                             "publication cites failed write " +
+                                 event.completed_operation->value);
+          proof_valid = false;
         }
       }
+    }
+    if (proof_valid && allocation->failed_writer) {
+      failed_publication(event, index, *allocation->failed_writer,
+                         "publication follows failed write " +
+                             allocation->failed_writer->value +
+                             " with no later successful write");
+      proof_valid = false;
     }
     bool pending_writer = false;
     for (const auto& [operation, record] : operations) {
@@ -335,6 +351,15 @@ struct Replay {
     if (!proof_valid || pending_writer) return;
     allocation->lifecycle = Lifecycle::Published;
     states[event.state].publications.insert(event.allocation);
+  }
+
+  void failed_publication(const PublishEvent& event, std::size_t index,
+                          const OperationId& operation, std::string message) {
+    diagnostic(DiagnosticCategory::FailedWritePublication, index,
+               std::move(message),
+               {"allocation=" + event.allocation.allocation.value,
+                "generation=" + std::to_string(event.allocation.generation),
+                "operation=" + operation.value});
   }
 
   void apply(const ConsumeEvent& event, std::size_t index) {
@@ -401,12 +426,34 @@ struct Replay {
                  "completion references an unknown operation " + event.operation.value);
       return;
     }
+    if (event.outcome != AccessOutcome::Succeeded && event.outcome != AccessOutcome::Failed) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "completion has an unknown access outcome");
+      return;
+    }
     if (found->second.completed) {
       diagnostic(DiagnosticCategory::DoubleCompletion, index,
                  "operation " + event.operation.value + " completed more than once");
       return;
     }
+    // Either outcome ends the access, so the operation's leases are released.
+    // Only the written contents differ: a failed write leaves them incomplete
+    // until a later write to the same generation succeeds.
     found->second.completed = true;
+    found->second.failed = event.outcome == AccessOutcome::Failed;
+    for (const auto& lease : found->second.leases) {
+      if (lease.access != AccessKind::Write) continue;
+      const auto allocation = allocations.find(lease.allocation.allocation);
+      if (allocation == allocations.end() ||
+          allocation->second.generation != lease.allocation.generation) {
+        continue;
+      }
+      if (found->second.failed) {
+        allocation->second.failed_writer = event.operation;
+      } else {
+        allocation->second.failed_writer.reset();
+      }
+    }
   }
 
   void apply(const RetireEvent& event, std::size_t index) {
@@ -542,6 +589,7 @@ std::string to_string(DiagnosticCategory category) {
     case DiagnosticCategory::PrematureReclaim: return "premature_reclaim";
     case DiagnosticCategory::OrphanedOperation: return "orphaned_operation";
     case DiagnosticCategory::DoubleCompletion: return "double_completion";
+    case DiagnosticCategory::FailedWritePublication: return "failed_write_publication";
     case DiagnosticCategory::InvalidStateTransition: return "invalid_state_transition";
     case DiagnosticCategory::IncompleteEvidence: return "incomplete_evidence";
     case DiagnosticCategory::MalformedTrace: return "malformed_trace";
@@ -554,7 +602,8 @@ std::optional<DiagnosticCategory> parse_category(std::string_view name) {
        {DiagnosticCategory::StaleGeneration, DiagnosticCategory::IncompatibleSemanticReuse,
         DiagnosticCategory::WriteThroughSharedImmutableState,
         DiagnosticCategory::PrematureReclaim, DiagnosticCategory::OrphanedOperation,
-        DiagnosticCategory::DoubleCompletion, DiagnosticCategory::InvalidStateTransition,
+        DiagnosticCategory::DoubleCompletion, DiagnosticCategory::FailedWritePublication,
+        DiagnosticCategory::InvalidStateTransition,
         DiagnosticCategory::IncompleteEvidence, DiagnosticCategory::MalformedTrace}) {
     if (to_string(category) == name) return category;
   }

@@ -164,7 +164,7 @@ void test_engine_completion_contract() {
   for (const bool duplicate : {false, true}) {
     TraceRecorder recorder(64);
     BufferPool pool(recorder, 2, 4);
-    CopyEngine engine(recorder, pool, EngineOptions{true, duplicate});
+    CopyEngine engine(recorder, pool, EngineOptions{true, duplicate, {}});
     const auto source = pool.acquire();
     const auto destination = pool.acquire();
     std::fill(pool.bytes(source).begin(), pool.bytes(source).end(), std::byte{7});
@@ -198,7 +198,7 @@ void test_engine_completion_contract() {
 
   TraceRecorder recorder(64);
   BufferPool pool(recorder, 2, 4);
-  CopyEngine engine(recorder, pool, EngineOptions{false, false});
+  CopyEngine engine(recorder, pool, EngineOptions{false, false, {}});
   const auto source = pool.acquire();
   const auto destination = pool.acquire();
   engine.submit(OperationId("copy"), RequestId("r"), source, destination);
@@ -387,6 +387,45 @@ void test_lost_coverage_is_never_clean() {
   }
 }
 
+void test_failed_loads_are_retried_or_reported() {
+  // load-1 fails in every schedule. A host that retries must stay clean and
+  // deliver intact bytes; a host that publishes the failed load must be
+  // reported at that publication in every schedule.
+  ScenarioOptions retry;
+  retry.engine.failing_operations = {"load-1"};
+  ScenarioOptions publish = retry;
+  publish.host.publish_failed_loads = true;
+
+  const auto retry_runs = explore_scenario(retry, [](const ScenarioRun& run) {
+    const auto report = check(run.trace);
+    require(report.clean() && run.delivered_intact && run.hazards.empty() &&
+                run.failed_publications == 0,
+            "retried load was not clean and intact: " + describe(report) + describe(run));
+    require(find_event(run.trace, [](const Event& e) {
+              const auto* c = std::get_if<CompleteAccessEvent>(&e);
+              return c != nullptr && c->operation.value == "load-1" &&
+                     c->outcome == AccessOutcome::Failed;
+            }).has_value() &&
+                completion_of(run.trace, "load-1-retry").has_value(),
+            "trace lacks the failed load or its retry" + describe(run));
+  });
+
+  const auto publish_runs = explore_scenario(publish, [](const ScenarioRun& run) {
+    const auto report = check(run.trace);
+    const auto* first = first_confirmed_finding(report);
+    require(report.status == CheckStatus::Violation && first != nullptr &&
+                first->category == DiagnosticCategory::FailedWritePublication &&
+                std::find(first->witness.begin(), first->witness.end(), "operation=load-1") !=
+                    first->witness.end(),
+            "publishing the failed load was not the first finding: " + describe(report) +
+                describe(run));
+    require(run.failed_publications == 1 && !run.delivered_intact && run.hazards.empty(),
+            "harness ground truth for the failed publication is wrong" + describe(run));
+  });
+  std::cout << "  failed load: " << retry_runs << " retry schedules clean, " << publish_runs
+            << " publish schedules reported\n";
+}
+
 void test_schedule_choices_are_validated_and_replayable() {
   ScenarioOptions immediate;
   immediate.host.reclaim = ReclaimPolicy::Immediate;
@@ -428,6 +467,7 @@ int main() {
       {"safe policy in every schedule", test_safe_policy_is_clean_in_every_schedule},
       {"induced bugs match harness hazards", test_induced_bugs_are_reported_exactly_when_unsafe},
       {"lost coverage is never clean", test_lost_coverage_is_never_clean},
+      {"failed loads", test_failed_loads_are_retried_or_reported},
       {"schedule choices", test_schedule_choices_are_validated_and_replayable},
       {"harness trace reduction", test_harness_trace_reduces_to_witness},
   };

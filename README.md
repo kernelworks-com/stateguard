@@ -45,7 +45,8 @@ A clean result covers only the supplied events and modeled rules.
 
 - Reuse or consumption with a stale allocation generation or mismatched state.
 - Reclaiming storage while a consumer or operation still holds it.
-- Writing to published immutable state, or publishing before writers finish.
+- Writing to published immutable state, publishing before writers finish, or
+  publishing the result of a failed write.
 - Invalid lifecycle transitions, orphaned operations, and duplicate completions.
 - Missing completion evidence and gaps in capture coverage.
 
@@ -89,8 +90,9 @@ induced immediate reclamation: violation
 ```
 
 In the buggy run request-2 really receives the wrong bytes. Further runs show
-lost coverage reported as `inconclusive`. Traces are written to
-`build/<name>.sgtrace`.
+lost coverage reported as `inconclusive`, and a failed load: retrying it is
+`clean`, publishing it anyway is `failed_write_publication`. Traces are written
+to `build/<name>.sgtrace`.
 
 ## On a CUDA GPU
 

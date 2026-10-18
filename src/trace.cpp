@@ -189,7 +189,13 @@ std::string serialize_trace(const Trace& trace) {
             out << "cancel|" << e.request.value << '\n';
           } else if constexpr (std::is_same_v<T, CompleteAccessEvent>) {
             validate_identifier(e.operation.value, "operation");
-            out << "complete|" << e.operation.value << '\n';
+            // A successful completion keeps the original two-field form.
+            out << "complete|" << e.operation.value;
+            if (e.outcome == AccessOutcome::Failed) out << "|failed";
+            else if (e.outcome != AccessOutcome::Succeeded) {
+              throw std::invalid_argument("unknown access outcome");
+            }
+            out << '\n';
           } else if constexpr (std::is_same_v<T, RetireEvent>) {
             out << "retire|" << ref_fields(e.allocation) << '\n';
           } else if constexpr (std::is_same_v<T, ReclaimEvent>) {
@@ -296,9 +302,16 @@ Trace parse_trace(std::string_view text) {
           require_token(fields[1], line_number, "request");
           trace.events.emplace_back(CancelRequestEvent{RequestId(fields[1])});
         } else if (kind == "complete") {
-          require(fields.size() == 2, line_number, "complete has the wrong field count");
+          require(fields.size() == 2 || fields.size() == 3, line_number,
+                  "complete has the wrong field count");
           require_token(fields[1], line_number, "operation");
-          trace.events.emplace_back(CompleteAccessEvent{OperationId(fields[1])});
+          auto outcome = AccessOutcome::Succeeded;
+          if (fields.size() == 3) {
+            require(fields[2] == "failed" || fields[2] == "succeeded", line_number,
+                    "invalid completion outcome");
+            if (fields[2] == "failed") outcome = AccessOutcome::Failed;
+          }
+          trace.events.emplace_back(CompleteAccessEvent{OperationId(fields[1]), outcome});
         } else if (kind == "retire" || kind == "reclaim") {
           require(fields.size() == 3, line_number, "allocation lifecycle event has the wrong field count");
           require_token(fields[1], line_number, "allocation");
