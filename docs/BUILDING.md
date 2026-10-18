@@ -49,6 +49,21 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-isystem$(xcru
 If your terminal shows `dquote>`, a pasted double quote was left unclosed.
 Press Ctrl+C and paste the complete single-line command again.
 
+## Optional CUDA harness
+
+The CUDA copy demo needs an NVIDIA GPU and the CUDA toolkit; it is off by default.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTATEGUARD_ENABLE_CUDA=ON
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure --no-tests=error
+```
+
+If CMake cannot find `nvcc`, add `-DCUDAToolkit_ROOT=/usr/local/cuda` (or your
+toolkit path). To run the whole check on a clean single-GPU machine such as Google
+Colab, run `bash scripts/colab_gpu_check.sh <commit>` from a clone of this
+repository.
+
 ## Report a build issue
 
 Include your operating system, compiler and CMake versions, the command you ran,
