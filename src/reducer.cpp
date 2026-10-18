@@ -31,9 +31,15 @@ using Keys = std::set<std::string>;
 //                   of a reused allocation stays connected to a stale reference;
 //   generation:A#g  every event touching generation g of A;
 //   lifecycle:A#g   allocate/bind/publish/retire/reclaim of that generation,
-//                   which can often go together while a reference to it stays.
+//                   which can often go together while a reference to it stays;
+//   endpoint:E      connections of E and every transfer routed through it;
+//   route:E:e:t     the submission and completion evidence of one transfer.
 Keys keys_of(const Event& event) {
   Keys keys;
+  const auto route = [&keys](const TransferRoute& r) {
+    keys.insert("endpoint:" + r.endpoint.value);
+    keys.insert("route:" + r.endpoint.value + ":" + std::to_string(r.epoch) + ":" + r.tag);
+  };
   const auto reference = [&keys](const AllocationRef& ref) {
     keys.insert("allocation:" + ref.allocation.value);
     keys.insert("generation:" + ref.allocation.value + "#" + std::to_string(ref.generation));
@@ -57,6 +63,7 @@ Keys keys_of(const Event& event) {
           for (const auto& dependency : e.dependencies) {
             keys.insert("operation:" + dependency.value);
           }
+          if (e.route) route(*e.route);
         } else if constexpr (std::is_same_v<T, PublishEvent>) {
           keys.insert("state:" + e.state.value);
           lifecycle(e.allocation);
@@ -69,6 +76,11 @@ Keys keys_of(const Event& event) {
           keys.insert("request:" + e.request.value);
         } else if constexpr (std::is_same_v<T, CompleteAccessEvent>) {
           keys.insert("operation:" + e.operation.value);
+          if (e.evidence) route(*e.evidence);
+        } else if constexpr (std::is_same_v<T, ExpireOperationEvent>) {
+          keys.insert("operation:" + e.operation.value);
+        } else if constexpr (std::is_same_v<T, ConnectEndpointEvent>) {
+          keys.insert("endpoint:" + e.endpoint.value);
         } else if constexpr (std::is_same_v<T, RetireEvent> ||
                              std::is_same_v<T, ReclaimEvent>) {
           lifecycle(e.allocation);
@@ -90,6 +102,8 @@ Keys keys_of(const Diagnostic& diagnostic) {
     if (name == "allocation" || name == "operation" || name == "state" ||
         name == "request") {
       keys.insert(std::string(name) + ":" + line.substr(separator + 1));
+    } else if (name == "route" || name == "evidence") {
+      keys.insert("route:" + line.substr(separator + 1));
     }
   }
   return keys;

@@ -21,6 +21,9 @@ enum class DiagnosticCategory {
   DoubleCompletion,
   // A state was published from an allocation whose last write failed.
   FailedWritePublication,
+  // A completion's backend evidence names a different transfer: another
+  // attempt, or an earlier epoch of the endpoint.
+  MisattributedCompletion,
   InvalidStateTransition,
   IncompleteEvidence,
   MalformedTrace,

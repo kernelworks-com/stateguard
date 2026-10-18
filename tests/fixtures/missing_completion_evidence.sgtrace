@@ -1,0 +1,8 @@
+STATEGUARD_TRACE|1
+connect|peer-a|1
+allocate|buffer-1|1|4096|cpu
+submit|send-1|request-1|r:buffer-1:1||peer-a:1:1
+complete|send-1
+retire|buffer-1|1
+reclaim|buffer-1|1
+end|complete

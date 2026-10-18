@@ -48,6 +48,8 @@ A clean result covers only the supplied events and modeled rules.
 - Writing to published immutable state, publishing before writers finish, or
   publishing the result of a failed write.
 - Invalid lifecycle transitions, orphaned operations, and duplicate completions.
+- A completion acknowledged with evidence from another attempt or an earlier
+  connection, and reclaims after a timeout that no completion confirmed.
 - Missing completion evidence and gaps in capture coverage.
 
 Shared state is allowed. Cancelling a request does not release an operation's

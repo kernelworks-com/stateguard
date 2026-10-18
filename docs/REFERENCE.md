@@ -59,8 +59,9 @@ event, so the result is inconclusive instead of a false violation.
 
 The checker currently reports stale generations, incompatible semantic reuse,
 writes against published immutable state, premature reclaim, orphaned or
-double-completed operations, publication of a failed write, invalid lifecycle
-transitions, and incomplete evidence. Retirement is idempotent. A cancellation releases a logical
+double-completed operations, publication of a failed write, completions whose
+transfer evidence belongs to another transfer, invalid lifecycle transitions,
+and incomplete evidence. Retirement is idempotent. A cancellation releases a logical
 consumer only; it does not release leases held by submitted asynchronous work.
 Publication waits for every writer lease on that allocation generation to
 complete. When a completion proof is supplied, it must identify a completed
@@ -97,6 +98,64 @@ can then be published citing the retry
 `tests/fixtures/failed_write_publication.sgtrace` is a `violation`). The
 checker only knows that a write failed if the adapter records the outcome; an
 adapter that reports every completion as successful hides this failure.
+
+## Retirement checks
+
+Memory can be reused only after every access to it has ended. Several things
+can look like the end of an access without proving it: a timeout, an expired
+lease, a disconnected peer, a reconnected transport, or a notification that
+belongs to a different transfer. These events let an adapter record them so
+the checker can tell them apart from a real completion.
+
+```text
+connect|peer-a|1
+submit|load-1|loader|r:staging-1:1;w:cache-1:1||peer-a:1:7
+expire|load-1|timeout
+complete|load-1|succeeded|peer-a:1:7
+```
+
+- `connect|<endpoint>|<epoch>` starts a new connection epoch of a transport
+  endpoint and ends the previous one. Epochs must increase.
+- An optional sixth `submit` field, `<endpoint>:<epoch>:<tag>`, is the operation's
+  transfer route: the endpoint, its current epoch, and the backend's tag for the
+  transfer. Two operations cannot share a route. A tag can repeat in a new epoch.
+- An optional fourth `complete` field is the route that the backend's completion
+  named. The outcome field is then required, for example
+  `complete|load-1|succeeded|peer-a:1:7`.
+- `expire|<operation>|<reason>` records that the host stopped waiting for an
+  operation. The reason is free text without separators.
+
+The rules:
+
+- A completion with evidence for a different route is `misattributed_completion`:
+  a notification from an earlier epoch, or the completion of another attempt,
+  such as the original load acknowledging its retry. The witness names the
+  operation, its route, and the evidence. The completion is not accepted, so the
+  operation's leases stay held and a later reclaim is premature.
+- A completion with evidence matching its own route is accepted, even after a
+  reconnect: a late notification for the old transfer does show that it ended.
+  A second matching completion is a `double_completion`.
+- A completion without evidence for an operation that has a route is accepted,
+  but the trace is `inconclusive`, because nothing ties it to the transfer.
+- `expire` and `connect` never release a lease. A reclaim while such an operation
+  is outstanding is `premature_reclaim`, and the message names the expiry or the
+  new epoch. A completion that arrives after the expiry still ends the access. An
+  expired operation that never completes leaves the trace unresolved.
+
+Fixtures: `routed_reconnect_clean.sgtrace` (clean),
+`stale_epoch_notification.sgtrace` and `retry_acknowledges_other_attempt.sgtrace`
+(`misattributed_completion`), `expired_lease_reclaim.sgtrace`
+(`premature_reclaim`), and `missing_completion_evidence.sgtrace`
+(`inconclusive`).
+
+Limits: the checker compares the routes that the adapter records. If an adapter
+copies the route from its own submission record instead of from the backend's
+notification, a misattributed completion looks correct. Routes are opt-in per
+operation; an operation without a route is checked as before. There is no event
+yet for a backend confirming that an endpoint has stopped all access from an old
+epoch, so each old operation needs its own completion. The generator does not
+produce routed histories, and no transport or engine adapter emits these events
+yet.
 
 ## Trace reduction
 
