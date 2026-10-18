@@ -3,8 +3,11 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -309,6 +312,103 @@ void test_failure_categories() {
           "orphan operation category missing");
 }
 
+// A load into cache-1 whose writer completions are given, in order, followed
+// by a publication of cache-1 with the given proof.
+Trace load_then_publish(const std::vector<std::pair<const char*, AccessOutcome>>& writes,
+                        std::optional<OperationId> proof) {
+  const AllocationRef cache{AllocationId("cache-1"), 1};
+  Trace trace;
+  trace.events = {AllocateEvent{cache.allocation, cache.generation, 4096, "cpu"},
+                  BindStateEvent{cache, StateId("state-1"), descriptor()}};
+  for (const auto& [operation, outcome] : writes) {
+    trace.events.emplace_back(SubmitEvent{OperationId(operation), RequestId("loader"),
+                                          {Lease{cache, AccessKind::Write}}, {}});
+  }
+  for (const auto& [operation, outcome] : writes) {
+    trace.events.emplace_back(CompleteAccessEvent{OperationId(operation), outcome});
+  }
+  trace.events.emplace_back(PublishEvent{StateId("state-1"), cache, std::move(proof)});
+  trace.events.emplace_back(EndTraceEvent{true});
+  return trace;
+}
+
+void test_failed_writes() {
+  const auto failed = fixture_report("failed_write_publication.sgtrace");
+  require(failed.status == CheckStatus::Violation && failed.diagnostics.size() == 1 &&
+              failed.diagnostics[0].category == DiagnosticCategory::FailedWritePublication &&
+              failed.diagnostics[0].event_index == 5,
+          "publishing a failed load must be the only finding");
+  require(fixture_report("failed_write_retry.sgtrace").status == CheckStatus::Clean,
+          "a failed load followed by a successful retry must be clean");
+
+  constexpr auto ok = AccessOutcome::Succeeded;
+  constexpr auto bad = AccessOutcome::Failed;
+  const auto category_of = [](const Trace& trace) {
+    const auto report = check(trace);
+    return report.diagnostics.size() == 1
+               ? std::optional<DiagnosticCategory>(report.diagnostics[0].category)
+               : std::nullopt;
+  };
+  require(category_of(load_then_publish({{"load-1", bad}}, std::nullopt)) ==
+              DiagnosticCategory::FailedWritePublication,
+          "a publication without proof after a failed write must be flagged");
+  require(check(load_then_publish({{"load-1", bad}, {"load-2", ok}}, std::nullopt)).clean(),
+          "a later successful write must redo the contents");
+  require(category_of(load_then_publish({{"load-2", ok}, {"load-1", bad}},
+                                        OperationId("load-2"))) ==
+              DiagnosticCategory::FailedWritePublication,
+          "a write that fails after a successful one must leave the contents incomplete");
+  require(category_of(load_then_publish({{"load-1", bad}, {"load-2", ok}},
+                                        OperationId("load-1"))) ==
+              DiagnosticCategory::FailedWritePublication,
+          "citing a failed write as proof must be flagged even after a retry");
+
+  auto twice = load_then_publish({{"load-1", bad}}, std::nullopt);
+  twice.events.insert(twice.events.end() - 2, CompleteAccessEvent{OperationId("load-1")});
+  require(has_category(check(twice), DiagnosticCategory::DoubleCompletion),
+          "a failed operation completes only once");
+
+  auto unknown = load_then_publish({{"load-1", ok}}, std::nullopt);
+  for (auto& event : unknown.events) {
+    if (auto* complete = std::get_if<CompleteAccessEvent>(&event)) {
+      complete->outcome = static_cast<AccessOutcome>(7);
+    }
+  }
+  require(has_category(check(unknown), DiagnosticCategory::InvalidStateTransition),
+          "an unknown access outcome must be rejected by the typed checker");
+  bool rejected = false;
+  try {
+    (void)serialize_trace(unknown);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "serializer must reject an unknown access outcome");
+
+  // The outcome survives a round trip; a successful completion keeps the
+  // original two-field form, and the explicit form parses to the same event.
+  const auto text = serialize_trace(load_then_publish({{"load-1", bad}, {"load-2", ok}},
+                                                      std::nullopt));
+  require(text.find("complete|load-1|failed\n") != std::string::npos &&
+              text.find("complete|load-2\n") != std::string::npos,
+          "completion outcome encoding changed");
+  require(parse_trace(text).events == load_then_publish({{"load-1", bad}, {"load-2", ok}},
+                                                        std::nullopt).events,
+          "completion outcome did not round-trip");
+  const auto explicit_ok = parse_trace("STATEGUARD_TRACE|1\ncomplete|op-1|succeeded\n");
+  require(std::get<CompleteAccessEvent>(explicit_ok.events[0]).outcome == ok,
+          "explicit success must parse");
+  for (const char* line : {"complete|op-1|maybe", "complete|op-1|failed|extra",
+                           "complete|op-1|"}) {
+    rejected = false;
+    try {
+      (void)parse_trace(std::string("STATEGUARD_TRACE|1\n") + line + "\n");
+    } catch (const TraceParseError&) {
+      rejected = true;
+    }
+    require(rejected, std::string("malformed completion accepted: ") + line);
+  }
+}
+
 void test_round_trip_and_malformed_input() {
   const auto parsed = parse_trace(fixture("shared_prefix.sgtrace"));
   const auto encoded = serialize_trace(parsed);
@@ -347,6 +447,7 @@ int main() {
       {"typed API validation", test_typed_api_rejects_malformed_identities},
       {"unknown access kind", test_unknown_access_kind_is_rejected},
       {"failure categories", test_failure_categories},
+      {"failed writes", test_failed_writes},
       {"round trip and malformed input", test_round_trip_and_malformed_input},
   };
   for (const auto& [name, test] : tests) {

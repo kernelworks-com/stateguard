@@ -27,6 +27,8 @@ enum class Fault {
   DroppedCompletion,
   CoverageGap,
   IncompleteEnd,
+  // A writer's access fails, and the state is published from it anyway.
+  FailedWritePublication,
 };
 
 struct GeneratorConfig {

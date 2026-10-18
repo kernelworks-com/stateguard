@@ -85,6 +85,9 @@ struct EngineOptions {
   bool reports_completion = true;
   // Post every notification twice, as a transport that redelivers can.
   bool duplicate_notifications = false;
+  // Copies with these operation identities fail: they write only the first
+  // half of the destination, then complete with a failed outcome.
+  std::set<std::string> failing_operations;
 };
 
 // Asynchronous buffer-to-buffer copies with a caller-controlled completion
@@ -93,9 +96,11 @@ struct EngineOptions {
 // copied until complete() runs the copy.
 //
 // Completion contract: complete() performs the copy, then records `complete`
-// for the operation, then posts the notification. A recorded completion
-// therefore proves that the engine has finished touching both buffers. The
-// notification is only a message to the host and may be duplicated.
+// for the operation with its outcome, then posts the notification. A recorded
+// completion, failed or not, therefore proves that the engine has finished
+// touching both buffers. A failed copy may have written part of the
+// destination. The notification is only a message to the host and may be
+// duplicated.
 class CopyEngine {
  public:
   CopyEngine(TraceRecorder& recorder, BufferPool& pool, EngineOptions options = {});
@@ -113,6 +118,8 @@ class CopyEngine {
   bool has_notifications() const { return !notifications_.empty(); }
   // Whether a pending copy can still read or write this generation.
   bool accessing(const BufferHandle& handle) const;
+  // Whether the operation completed and its copy failed.
+  bool failed(const OperationId& operation) const { return failed_.contains(operation); }
 
  private:
   struct Job {
@@ -128,6 +135,7 @@ class CopyEngine {
   EngineOptions options_;
   std::vector<Job> jobs_;
   std::set<OperationId> submitted_;
+  std::set<OperationId> failed_;
   std::deque<OperationId> notifications_;
 };
 
@@ -144,6 +152,10 @@ struct HostOptions {
   // Ignore repeated notifications for one operation. When false, every
   // notification drops the operation's holds again. That is the induced bug.
   bool idempotent_notifications = true;
+  // Publish a loaded state even when its load failed. That is the induced
+  // bug. Otherwise the host stages the bytes again into a new buffer and
+  // retries the load as "<operation>-retry".
+  bool publish_failed_loads = false;
 };
 
 // A reclaim that was unsafe according to the harness's own state, which the
@@ -167,7 +179,8 @@ class CacheHost {
   void fill(const BufferHandle& buffer, std::byte value);
   // Binds the state to `cache` and copies `staging` into it as request
   // "loader". The state is published when the load's notification is
-  // processed, unless `cache` has been released by then.
+  // processed, unless `cache` has been released by then. The host keeps a
+  // copy of the staged bytes so that it can retry a failed load.
   void load(const OperationId& operation, const BufferHandle& staging,
             const BufferHandle& cache, const StateId& state,
             const SemanticDescriptor& descriptor);
@@ -187,6 +200,8 @@ class CacheHost {
   bool published(const StateId& state) const { return published_.contains(state); }
   bool notified(const OperationId& operation) const;
   const std::vector<Hazard>& hazards() const { return hazards_; }
+  // States published from a load that failed, by the host's own record.
+  std::size_t failed_publications() const { return failed_publications_; }
 
  private:
   struct BufferRecord {
@@ -198,11 +213,13 @@ class CacheHost {
     BufferHandle destination;
     std::optional<StateId> publishes;
     bool notified = false;
+    std::vector<std::byte> payload;  // Staged bytes of a load, for a retry.
   };
 
   void hold(const BufferHandle& buffer);
   void drop(const BufferHandle& buffer);
   void reclaim(const BufferHandle& buffer);
+  void retry(const OperationId& operation, const OperationRecord& record);
 
   TraceRecorder& recorder_;
   BufferPool& pool_;
@@ -213,6 +230,7 @@ class CacheHost {
   std::map<RequestId, std::vector<BufferHandle>> consumers_;
   std::set<StateId> published_;
   std::vector<Hazard> hazards_;
+  std::size_t failed_publications_ = 0;
 };
 
 struct ScenarioOptions {
@@ -225,6 +243,7 @@ struct ScenarioRun {
   Trace trace;
   CaptureStats capture;
   std::vector<Hazard> hazards;
+  std::size_t failed_publications = 0;
   // Whether request-2 received the bytes that were staged for prefix-1.
   bool delivered_intact = false;
   // The actions in the order they ran, for reporting a failing schedule.

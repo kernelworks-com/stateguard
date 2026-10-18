@@ -62,6 +62,8 @@ struct Slot {
   std::size_t prefix = 0;
   std::set<std::size_t> consumers;
   std::vector<std::pair<Generation, std::size_t>> bindings;
+  // The current generation's last write failed and has not been redone.
+  bool failed_write = false;
 };
 
 struct Operation {
@@ -69,6 +71,7 @@ struct Operation {
   std::vector<Lease> leases;
   bool completed = false;
   bool lost = false;  // Completion is withheld to model capture loss.
+  bool failed = false;
 };
 
 struct Request {
@@ -133,6 +136,7 @@ class Builder {
       case Fault::WriteThroughSharedImmutableState:
         return DiagnosticCategory::WriteThroughSharedImmutableState;
       case Fault::DoubleCompletion: return DiagnosticCategory::DoubleCompletion;
+      case Fault::FailedWritePublication: return DiagnosticCategory::FailedWritePublication;
       case Fault::OrphanedCompletion: return DiagnosticCategory::OrphanedOperation;
       case Fault::PublishBeforeWriterCompletion:
         return DiagnosticCategory::InvalidStateTransition;
@@ -191,6 +195,7 @@ class Builder {
     for (std::size_t i = 0; i < operations_.size(); ++i) {
       const auto& op = operations_[i];
       if (op.completed != completed) continue;
+      if (op.failed) continue;  // A failed write cannot prove publication.
       for (const auto& lease : op.leases) {
         if (lease.access == AccessKind::Write && lease.allocation == current) {
           result.push_back(i);
@@ -253,6 +258,7 @@ class Builder {
     ++slot.generation;
     slot.life = Life::Reserved;
     slot.consumers.clear();
+    slot.failed_write = false;
     emit(AllocateEvent{slot.id, slot.generation, 4096 * (1 + random_.below(4)), "cpu"});
   }
 
@@ -292,6 +298,13 @@ class Builder {
 
   void complete(std::size_t o) {
     operations_[o].completed = true;
+    // A successful write redoes the contents of a generation a failed write left.
+    for (const auto& lease : operations_[o].leases) {
+      if (lease.access != AccessKind::Write) continue;
+      for (auto& slot : slots_) {
+        if (ref(slot) == lease.allocation) slot.failed_write = false;
+      }
+    }
     emit(CompleteAccessEvent{operations_[o].id});
   }
 
@@ -347,7 +360,8 @@ class Builder {
           break;
         case Life::Initializing:
           if (requests) actions.push_back({4, [this, s] { submit_writer(s); }});
-          if (writers(slot, false).empty() && !writers(slot, true).empty()) {
+          if (writers(slot, false).empty() && !writers(slot, true).empty() &&
+              !slot.failed_write) {
             actions.push_back({5, [this, s] { publish(s); }});
           }
           actions.push_back({1, [this, s] { retire(s); }});
@@ -439,7 +453,8 @@ class Builder {
     submit_writer(s, false);
     if (config_.fault == Fault::PrematureReclaim ||
         config_.fault == Fault::PublishBeforeWriterCompletion ||
-        config_.fault == Fault::DroppedCompletion) {
+        config_.fault == Fault::DroppedCompletion ||
+        config_.fault == Fault::FailedWritePublication) {
       return;
     }
     complete(operations_.size() - 1);
@@ -531,6 +546,26 @@ class Builder {
       case Fault::CoverageGap:
         plant(CoverageGapEvent{"injected capture loss"});
         break;
+      case Fault::FailedWritePublication: {
+        // A slot with exactly one pending writer, so that the publication's
+        // only problem is the failed write.
+        std::vector<std::size_t> writing;
+        for (const auto s : slots_in({Life::Initializing}, all)) {
+          const auto pending = writers(slots_[s], false);
+          if (pending.size() == 1 && !operations_[pending.front()].lost) writing.push_back(s);
+        }
+        if (writing.empty()) return false;
+        const auto s = random_.pick(writing);
+        auto& op = operations_[writers(slots_[s], false).front()];
+        op.completed = true;
+        op.failed = true;
+        slots_[s].failed_write = true;
+        emit(CompleteAccessEvent{op.id, AccessOutcome::Failed});
+        std::optional<OperationId> proof;
+        if (random_.chance(1, 2)) proof = op.id;
+        plant(PublishEvent{state(slots_[s].prefix), ref(slots_[s]), proof});
+        break;
+      }
       case Fault::IncompleteEnd:
         break;  // Planted by the end marker.
     }
@@ -586,6 +621,7 @@ const std::vector<Fault>& fault_kinds() {
       Fault::DroppedCompletion,
       Fault::CoverageGap,
       Fault::IncompleteEnd,
+      Fault::FailedWritePublication,
   };
   return kinds;
 }
@@ -604,6 +640,7 @@ std::string to_string(Fault fault) {
     case Fault::DroppedCompletion: return "dropped_completion";
     case Fault::CoverageGap: return "coverage_gap";
     case Fault::IncompleteEnd: return "incomplete_end";
+    case Fault::FailedWritePublication: return "failed_write_publication";
   }
   return "unknown";
 }

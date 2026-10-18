@@ -59,12 +59,44 @@ event, so the result is inconclusive instead of a false violation.
 
 The checker currently reports stale generations, incompatible semantic reuse,
 writes against published immutable state, premature reclaim, orphaned or
-double-completed operations, invalid lifecycle transitions, and incomplete
-evidence. Retirement is idempotent. A cancellation releases a logical
+double-completed operations, publication of a failed write, invalid lifecycle
+transitions, and incomplete evidence. Retirement is idempotent. A cancellation releases a logical
 consumer only; it does not release leases held by submitted asynchronous work.
 Publication waits for every writer lease on that allocation generation to
 complete. When a completion proof is supplied, it must identify a completed
 operation that held the matching initialization write lease.
+
+## Failed completions
+
+A completion can record that the operation's access failed:
+
+```text
+complete|load-1|failed
+```
+
+The third field is optional. `succeeded` is also accepted, and a successful
+completion is still written in the two-field form `complete|load-1`, so traces
+without failures are unchanged. A reader that predates the field rejects the
+line as malformed instead of reading the failure as a success. In the API, the
+field is `CompleteAccessEvent::outcome` (`AccessOutcome::Succeeded` or
+`AccessOutcome::Failed`).
+
+A failed completion still ends the access: the operation no longer touches its
+allocations, so its leases are released and a later reclaim is not premature.
+What it does not do is leave valid data. The allocation generation it wrote is
+treated as incomplete until a later writer to the same generation completes
+successfully. The checker reports `failed_write_publication` when a `publish`:
+
+- cites a failed operation as its completion proof, or
+- names an allocation generation whose most recent completed write failed.
+
+The witness names the allocation, generation, and failed operation. A retry
+that writes the same generation and succeeds clears the failure, so the state
+can then be published citing the retry
+(`tests/fixtures/failed_write_retry.sgtrace` is `clean`;
+`tests/fixtures/failed_write_publication.sgtrace` is a `violation`). The
+checker only knows that a write failed if the adapter records the outcome; an
+adapter that reports every completion as successful hides this failure.
 
 ## Trace reduction
 
@@ -142,6 +174,7 @@ planted event:
 | `double_completion` | `violation` / `double_completion` |
 | `orphaned_completion` | `violation` / `orphaned_operation` |
 | `publish_before_writer_completion` | `violation` / `invalid_state_transition` |
+| `failed_write_publication` | `violation` / `failed_write_publication` |
 | `dropped_completion` | `inconclusive` / `incomplete_evidence` |
 | `coverage_gap` | `inconclusive` / `incomplete_evidence` |
 | `incomplete_end` | `inconclusive` / `incomplete_evidence` |
@@ -185,8 +218,10 @@ An adapter that cannot observe part of the lifecycle should record its own
 - `CopyEngine` copies between buffers asynchronously. It resolves both addresses
   when a copy is submitted, as a device would, and copies only when the caller
   completes the operation. Its completion contract: it copies, records
-  `complete`, and only then posts a notification. A recorded completion
-  therefore proves that the copy no longer touches either buffer. Notifications
+  `complete` with its outcome, and only then posts a notification. A recorded
+  completion, failed or not, therefore proves that the copy no longer touches
+  either buffer. Copies listed in `EngineOptions::failing_operations` write only
+  the first half of the destination and complete as `failed`. Notifications
   can be delivered twice. An engine configured without completion reporting
   records a coverage gap instead.
 - `CacheHost` loads staged bytes into cache buffers, publishes a state when its
@@ -195,6 +230,10 @@ An adapter that cannot observe part of the lifecycle should record its own
   copy that touches it has been notified and every consuming request has ended.
   The immediate policy reclaims at once. That is the induced bug. A host that
   counts every repeated notification as a release is a second induced bug.
+  When a load fails, the host stages the bytes again into a new buffer and
+  retries the load as `<operation>-retry` before publishing. With
+  `HostOptions::publish_failed_loads`, it publishes the failed load instead.
+  That is a third induced bug.
 
 The scenario stages two prefixes and loads them. Two requests share prefix-1
 and copy it out. One request is cancelled while its copy may still be running,
@@ -203,11 +242,13 @@ buffer then takes the most recently freed slot. `explore_scenario` runs every
 schedule: at each point, the host takes its next step, processes queued
 notifications, or one pending copy completes. Host steps that wait for a
 notification are never moved ahead of it, so no synchronization edge is
-removed. Each configuration has 15,982 schedules.
+removed. Each configuration has 15,982 schedules, except the retried failed load,
+whose extra copy gives it 41,550.
 
 The harness also records which reclaims were unsafe from its own state: a copy
-was still pending in the engine, or a request still consumed the buffer. The
-checker sees only events. The tests require the two to agree on every schedule:
+was still pending in the engine, or a request still consumed the buffer. It
+also counts the failed loads it published. The checker sees only events. The
+tests require the two to agree on every schedule:
 
 | Configuration | Result |
 |---|---|
@@ -217,19 +258,24 @@ checker sees only events. The tests require the two to agree on every schedule:
 | Repeated notifications ignored | `clean` in every schedule |
 | Capture buffer of 16 events | never `clean`; a `violation` only for an unsafe reclaim captured before the gap |
 | Engine without completion reporting | `inconclusive` in every schedule |
+| `load-1` fails, host retries | `clean` in all 41,550 schedules, and request-2's bytes are intact |
+| `load-1` fails, host publishes it | `violation` in every schedule; the first finding is `failed_write_publication` for `load-1`, and request-2 does not receive the staged bytes |
 
-For each violation, the first confirmed finding is `premature_reclaim` for the
+For each reclaim violation, the first confirmed finding is `premature_reclaim` for the
 first unsafe reclaim, with the matching reason (active lease or live consumer).
 After that finding, the checker reports follow-on errors: the slot is reused while
-the checker still treats the old generation as live. Run `stateguard-reduce` to
-get a witness for the first failure.
+the checker still treats the old generation as live. In the failed-publication
+run, the rejected publication is not recorded, so each later consumption of that
+state is also reported as consuming an unpublished allocation. Run
+`stateguard-reduce` to get a witness for the first failure.
 
 Limits: the harness runs on the CPU in one thread, and its schedules are the
 completion and notification orders of one fixed scenario. It does not show that
 CUDA, RDMA, NIXL, or any serving engine emits faithful events. Requests end with
 `cancel`, because the event vocabulary has no separate event for a finished
-request. A copy cannot fail in this harness. No event records a failed transfer
-yet, so publishing the result of a failed write is not detected.
+request. A copy fails only when the test names it in `failing_operations`, and
+it fails the same way each time: half the bytes are written, then the failure is
+reported.
 
 ## CUDA copy harness
 
@@ -265,7 +311,9 @@ reported the unsafe reclaim in both cases.
 
 Limits: this is one GPU, driver, and toolkit on a shared cloud machine. The
 harness emits its own events, so the result does not show that another CUDA
-program, RDMA, NIXL, or a serving engine emits faithful events.
+program, RDMA, NIXL, or a serving engine emits faithful events. The CUDA engine
+records only successful completions; a CUDA error stops the demo with an
+exception instead of being recorded as a failed completion.
 
 ## Scope and limitations
 

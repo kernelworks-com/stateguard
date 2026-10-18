@@ -1,4 +1,4 @@
-// Runs the instrumented async-copy harness under four configurations and
+// Runs the instrumented async-copy harness under six configurations and
 // checks each captured trace. Every copy completes as late as the host allows,
 // which is the schedule where an early reclaim does the most damage.
 //
@@ -38,6 +38,10 @@ std::vector<Configuration> configurations() {
   overflow.capture_capacity = 16;
   ScenarioOptions no_completion;
   no_completion.engine.reports_completion = false;
+  ScenarioOptions failed_retry;
+  failed_retry.engine.failing_operations = {"load-1"};
+  ScenarioOptions failed_publish = failed_retry;
+  failed_publish.host.publish_failed_loads = true;
   return {
       {"safe", "safe deferred reclamation", safe, CheckStatus::Clean},
       {"immediate", "induced immediate reclamation", immediate, CheckStatus::Violation},
@@ -45,6 +49,10 @@ std::vector<Configuration> configurations() {
        CheckStatus::Inconclusive},
       {"no-completion", "safe run on an engine without completion events", no_completion,
        CheckStatus::Inconclusive},
+      {"failed-retry", "failed load retried before publication", failed_retry,
+       CheckStatus::Clean},
+      {"failed-publish", "induced publication of a failed load", failed_publish,
+       CheckStatus::Violation},
   };
 }
 
@@ -94,7 +102,12 @@ int main(int argc, char** argv) {
                                                                  : "not observed")
               << '\n';
     std::cout << "  harness: " << run.hazards.size() << " unsafe reclaim"
-              << (run.hazards.size() == 1 ? "" : "s") << "; request-2 received "
+              << (run.hazards.size() == 1 ? "" : "s");
+    if (run.failed_publications > 0) {
+      std::cout << ", " << run.failed_publications << " failed load"
+                << (run.failed_publications == 1 ? "" : "s") << " published";
+    }
+    std::cout << "; request-2 received "
               << (run.delivered_intact ? "prefix-1 intact" : "corrupted bytes") << '\n';
 
     if (trace_dir) {

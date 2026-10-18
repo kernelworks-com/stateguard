@@ -112,8 +112,13 @@ void CopyEngine::complete(const OperationId& operation) {
   }
   // The addresses were resolved at submission. If the host reclaimed a slot
   // early, this copy touches whatever generation owns it now.
-  std::memmove(job->to, job->from, pool_.slot_bytes());
-  if (options_.reports_completion) recorder_.record(CompleteAccessEvent{operation});
+  const bool fails = options_.failing_operations.contains(operation.value);
+  std::memmove(job->to, job->from, fails ? pool_.slot_bytes() / 2 : pool_.slot_bytes());
+  if (options_.reports_completion) {
+    recorder_.record(CompleteAccessEvent{
+        operation, fails ? AccessOutcome::Failed : AccessOutcome::Succeeded});
+  }
+  if (fails) failed_.insert(operation);
   jobs_.erase(job);
   notifications_.push_back(operation);
   if (options_.duplicate_notifications) notifications_.push_back(operation);
@@ -158,8 +163,10 @@ void CacheHost::load(const OperationId& operation, const BufferHandle& staging,
                      const SemanticDescriptor& descriptor) {
   if (!buffers_.contains(cache)) throw std::logic_error("load: cache buffer is not live");
   recorder_.record(BindStateEvent{to_ref(cache), state, descriptor});
+  const auto staged = pool_.bytes(staging);
   engine_.submit(operation, RequestId("loader"), staging, cache);
-  operations_[operation] = OperationRecord{staging, cache, state, false};
+  operations_[operation] = OperationRecord{staging, cache, state, false,
+                                           {staged.begin(), staged.end()}};
   hold(staging);
   hold(cache);
 }
@@ -175,7 +182,7 @@ void CacheHost::consume(const RequestId& request, const StateId& state,
 void CacheHost::send(const OperationId& operation, const RequestId& request,
                      const BufferHandle& source, const BufferHandle& destination) {
   engine_.submit(operation, request, source, destination);
-  operations_[operation] = OperationRecord{source, destination, std::nullopt, false};
+  operations_[operation] = OperationRecord{source, destination, std::nullopt, false, {}};
   hold(source);
   hold(destination);
 }
@@ -208,12 +215,32 @@ void CacheHost::poll() {
     // released during the load is retiring and must not become readable.
     const auto cache = buffers_.find(record.destination);
     if (first && record.publishes && cache != buffers_.end() && !cache->second.released) {
-      recorder_.record(PublishEvent{*record.publishes, to_ref(record.destination), *operation});
-      published_.insert(*record.publishes);
+      const bool failed = engine_.failed(*operation);
+      if (failed && !options_.publish_failed_loads) {
+        retry(*operation, record);
+      } else {
+        if (failed) ++failed_publications_;
+        recorder_.record(PublishEvent{*record.publishes, to_ref(record.destination), *operation});
+        published_.insert(*record.publishes);
+      }
     }
     drop(record.source);
     drop(record.destination);
   }
+}
+
+void CacheHost::retry(const OperationId& operation, const OperationRecord& record) {
+  // The failed load's staging buffer may already be retiring, so stage the
+  // bytes again into a new buffer. The retry has its own identity.
+  const auto staging = allocate();
+  std::copy(record.payload.begin(), record.payload.end(), pool_.bytes(staging).begin());
+  const OperationId attempt(operation.value + "-retry");
+  engine_.submit(attempt, RequestId("loader"), staging, record.destination);
+  operations_[attempt] = OperationRecord{staging, record.destination, record.publishes, false,
+                                         record.payload};
+  hold(staging);
+  hold(record.destination);
+  release(staging);
 }
 
 bool CacheHost::notified(const OperationId& operation) const {
@@ -327,6 +354,7 @@ class Scenario {
     run.trace = recorder_.finish();
     run.capture = recorder_.stats();
     run.hazards = host_.hazards();
+    run.failed_publications = host_.failed_publications();
     run.delivered_intact = delivered_intact_;
     run.schedule = std::move(schedule_);
     return run;

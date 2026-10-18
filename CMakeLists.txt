@@ -131,6 +131,16 @@ if(STATEGUARD_BUILD_TESTS)
     set_tests_properties(cli-check-harness-immediate PROPERTIES
       FIXTURES_REQUIRED harness_traces
       PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+    add_test(NAME cli-check-harness-failed-retry
+      COMMAND stateguard-check ${cli_dir}/failed-retry.sgtrace)
+    set_tests_properties(cli-check-harness-failed-retry PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "^clean\n$")
+    add_test(NAME cli-check-harness-failed-publish
+      COMMAND stateguard-check ${cli_dir}/failed-publish.sgtrace)
+    set_tests_properties(cli-check-harness-failed-publish PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ failed_write_publication")
     add_test(NAME cli-reduce-harness-immediate
       COMMAND stateguard-reduce ${cli_dir}/immediate.sgtrace)
     set_tests_properties(cli-reduce-harness-immediate PROPERTIES

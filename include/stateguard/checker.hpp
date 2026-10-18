@@ -19,6 +19,8 @@ enum class DiagnosticCategory {
   PrematureReclaim,
   OrphanedOperation,
   DoubleCompletion,
+  // A state was published from an allocation whose last write failed.
+  FailedWritePublication,
   InvalidStateTransition,
   IncompleteEvidence,
   MalformedTrace,

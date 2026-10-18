@@ -1,0 +1,16 @@
+STATEGUARD_TRACE|1
+allocate|staging-1|1|4096|cpu
+allocate|cache-1|1|4096|cpu
+bind_state|cache-1|1|state-1|demo|model-r1|cpu-cache|layer-0|prefix-42|0|16|fp16|row-major|absolute
+submit|load-1|loader|r:staging-1:1;w:cache-1:1|
+complete|load-1|failed
+submit|load-1-retry|loader|r:staging-1:1;w:cache-1:1|
+complete|load-1-retry
+publish|state-1|cache-1|1|load-1-retry
+retire|staging-1|1
+reclaim|staging-1|1
+consume|request-1|state-1|cache-1|1|demo|model-r1|cpu-cache|layer-0|prefix-42|0|16|fp16|row-major|absolute
+cancel|request-1
+retire|cache-1|1
+reclaim|cache-1|1
+end|complete
