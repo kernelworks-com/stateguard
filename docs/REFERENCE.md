@@ -154,8 +154,8 @@ notification, a misattributed completion looks correct. Routes are opt-in per
 operation; an operation without a route is checked as before. There is no event
 yet for a backend confirming that an endpoint has stopped all access from an old
 epoch, so each old operation needs its own completion. The generator does not
-produce routed histories, and no transport or engine adapter emits these events
-yet.
+produce routed histories. Only the CPU [async-copy harness](#routed-transfers)
+emits these events; no transport or engine adapter does yet.
 
 ## Trace reduction
 
@@ -327,6 +327,50 @@ the checker still treats the old generation as live. In the failed-publication
 run, the rejected publication is not recorded, so each later consumption of that
 state is also reported as consuming an unpublished allocation. Run
 `stateguard-reduce` to get a witness for the first failure.
+
+### Routed transfers
+
+With `EngineOptions::endpoint` set, the engine acts as a transport endpoint and
+exercises the [retirement checks](#retirement-checks). It records `connect` for
+epoch 1, gives each copy a route whose tag is counted from 1 in every epoch (so
+tags repeat after `reconnect()`), and records no completions itself. Each
+notification names its route and outcome; the host decides which operation it
+belongs to and records `complete` with that route as evidence. With
+`redeliver_on_reconnect`, a reconnect delivers the old epoch's notifications
+again. `HostOptions::attribution` chooses how the host matches a notification:
+by the whole route, by tag only, or by route but credited to the newest retry
+of the operation. `HostOptions::timeout` chooses whether a timed-out operation
+keeps its buffers until its completion arrives or drops them at once.
+
+Two scenarios use routes (`ScenarioOptions::kind`):
+
+- **Reconnect.** load-1 is submitted in epoch 1 and may complete before or after
+  the endpoint reconnects. load-2 then gets the same tag in epoch 2, and a
+  request reads prefix-2 once it is published.
+- **Timeout and retry.** load-1 cannot complete before the host gives up on it.
+  The host records `expire`, retries the load as `load-1-retry` into a new cache
+  buffer, and releases the original buffers. The original copy keeps running and
+  completes later.
+
+Beyond unsafe reclaims, the harness's ground truth counts notifications the host
+credited to an operation the engine did not run, and operations whose real
+completion the host dropped as a repeat. The tests require, for every schedule:
+a misattributed notification is a `violation` whose first finding is
+`misattributed_completion`; a dropped completion without a misattribution is
+`inconclusive`; otherwise the trace is `clean`.
+
+| Configuration | Schedules | Result |
+|---|---|---|
+| Reconnect, host matches the whole route | 22 (24 with redelivery) | `clean` in every schedule, bytes intact |
+| Reconnect, host matches the tag only | 55 (68 with redelivery) | `misattributed_completion` in 39 (52), naming load-2 and the epoch-1 evidence; `inconclusive` in 13 where load-1's completion was dropped; `clean` in 3 |
+| Timeout, host waits for the late completion | 15 | `clean` in every schedule, bytes intact |
+| Timeout, host reclaims on timeout | 15 | `premature_reclaim` in every schedule, citing the expiry; bytes intact in all 15 |
+| Timeout, original completion credited to the retry | 26 | `misattributed_completion` in 13, naming load-1-retry; `inconclusive` in the other 13, where the retry was credited first and the original's completion was dropped |
+
+Reclaiming on timeout never corrupted the delivered bytes here, because the
+retry writes a new buffer, but the original copy still ran against reclaimed
+memory. The checker reports the ordering either way. These scenarios have few
+schedules because each has only two or three copies.
 
 Limits: the harness runs on the CPU in one thread, and its schedules are the
 completion and notification orders of one fixed scenario. It does not show that
