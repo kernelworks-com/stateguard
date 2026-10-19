@@ -88,6 +88,26 @@ struct EngineOptions {
   // Copies with these operation identities fail: they write only the first
   // half of the destination, then complete with a failed outcome.
   std::set<std::string> failing_operations;
+  // When set, the engine is a transport endpoint. It records connection
+  // epoch 1 when constructed, gives every copy a route (the endpoint, the
+  // current epoch, and a tag counted from 1 in each epoch, so tags repeat
+  // after a reconnect), and does not record completions itself: each
+  // notification names its route and outcome, and the host records the
+  // completion it attributes to that notification.
+  std::optional<EndpointId> endpoint{};
+  // On reconnect, deliver again every notification posted in the old epoch,
+  // as a transport that replays unacknowledged messages can.
+  bool redeliver_on_reconnect = false;
+};
+
+// A completion message from the engine to the host.
+struct Notification {
+  // The operation the engine ran. A routed host must not rely on it, because
+  // a real backend reports only the route; the harness uses it as ground
+  // truth for the host's attribution.
+  OperationId operation;
+  std::optional<TransferRoute> route{};
+  AccessOutcome outcome = AccessOutcome::Succeeded;
 };
 
 // Asynchronous buffer-to-buffer copies with a caller-controlled completion
@@ -100,18 +120,26 @@ struct EngineOptions {
 // completion, failed or not, therefore proves that the engine has finished
 // touching both buffers. A failed copy may have written part of the
 // destination. The notification is only a message to the host and may be
-// duplicated.
+// duplicated. A routed engine posts the notification without recording; the
+// completion the host records is then evidence only if the host attributes
+// the notification to the operation its route belongs to.
 class CopyEngine {
  public:
   CopyEngine(TraceRecorder& recorder, BufferPool& pool, EngineOptions options = {});
 
   // Throws std::logic_error for a reused operation identity or a stale handle.
-  void submit(const OperationId& operation, const RequestId& request,
-              const BufferHandle& source, const BufferHandle& destination);
+  // Returns the copy's route on a routed engine.
+  std::optional<TransferRoute> submit(const OperationId& operation, const RequestId& request,
+                                      const BufferHandle& source,
+                                      const BufferHandle& destination);
   // Throws std::logic_error when the operation is not pending.
   void complete(const OperationId& operation);
+  // Starts the next connection epoch and records it. Pending copies keep
+  // running and later notify with their original route. Throws
+  // std::logic_error on an engine without an endpoint.
+  void reconnect();
   // The next notification, if any.
-  std::optional<OperationId> poll();
+  std::optional<Notification> poll();
 
   // Pending operations in submission order.
   std::vector<OperationId> pending() const;
@@ -128,6 +156,7 @@ class CopyEngine {
     BufferHandle destination;
     const std::byte* from = nullptr;
     std::byte* to = nullptr;
+    std::optional<TransferRoute> route{};
   };
 
   TraceRecorder& recorder_;
@@ -136,7 +165,10 @@ class CopyEngine {
   std::vector<Job> jobs_;
   std::set<OperationId> submitted_;
   std::set<OperationId> failed_;
-  std::deque<OperationId> notifications_;
+  std::deque<Notification> notifications_;
+  std::uint64_t epoch_ = 0;
+  std::uint64_t next_tag_ = 1;
+  std::vector<Notification> posted_in_epoch_;  // For redelivery on reconnect.
 };
 
 enum class ReclaimPolicy {
@@ -145,6 +177,28 @@ enum class ReclaimPolicy {
   Deferred,
   // Reclaim as soon as the host releases a buffer. This is the induced bug.
   Immediate,
+};
+
+enum class Attribution {
+  // Match the whole route: endpoint, epoch, and tag.
+  Route,
+  // Match the tag alone, to the latest operation submitted with it. Tags
+  // repeat after a reconnect, so a notification from the earlier epoch
+  // acknowledges a new transfer. This is the induced bug.
+  TagOnly,
+  // Match the route, then credit the newest retry of that operation. A late
+  // completion of the original attempt then acknowledges its retry. This is
+  // the induced bug.
+  LatestAttempt,
+};
+
+enum class TimeoutPolicy {
+  // Keep an expired operation's buffers until its completion arrives.
+  Wait,
+  // Treat the timeout as the end of the operation and drop its holds, so its
+  // buffers can be reclaimed while the copy may still run. This is the induced
+  // bug.
+  Reclaim,
 };
 
 struct HostOptions {
@@ -156,6 +210,10 @@ struct HostOptions {
   // bug. Otherwise the host stages the bytes again into a new buffer and
   // retries the load as "<operation>-retry".
   bool publish_failed_loads = false;
+  // How a routed engine's notification is matched to an operation.
+  Attribution attribution = Attribution::Route;
+  // What the host does when it gives up waiting for an operation.
+  TimeoutPolicy timeout = TimeoutPolicy::Wait;
 };
 
 // A reclaim that was unsafe according to the harness's own state, which the
@@ -194,6 +252,14 @@ class CacheHost {
   // does not release the request's submitted copies.
   void end_request(const RequestId& request);
   void release(const BufferHandle& buffer);
+  // Records that the host stopped waiting for the operation. Under
+  // TimeoutPolicy::Reclaim it also drops the operation's holds.
+  void expire(const OperationId& operation, const std::string& reason);
+  // Gives up on a pending load: stages its bytes again into a new staging
+  // buffer, binds the state to a new cache buffer, loads it there as
+  // "<operation>-retry", and releases both the new staging buffer and the
+  // original cache buffer. Returns the new cache buffer.
+  BufferHandle reload(const OperationId& operation);
   // Processes every queued notification.
   void poll();
 
@@ -202,6 +268,11 @@ class CacheHost {
   const std::vector<Hazard>& hazards() const { return hazards_; }
   // States published from a load that failed, by the host's own record.
   std::size_t failed_publications() const { return failed_publications_; }
+  // Notifications the host credited to an operation other than the one the
+  // engine ran, by the harness's ground truth.
+  std::size_t misattributions() const { return misattributions_; }
+  // Operations the host submitted but never credited with a notification.
+  std::size_t unacknowledged() const;
 
  private:
   struct BufferRecord {
@@ -214,12 +285,18 @@ class CacheHost {
     std::optional<StateId> publishes;
     bool notified = false;
     std::vector<std::byte> payload;  // Staged bytes of a load, for a retry.
+    std::optional<SemanticDescriptor> descriptor{};  // Of a load's state.
+    std::optional<TransferRoute> route{};
+    std::optional<OperationId> retried_as{};
+    bool abandoned = false;  // Holds dropped on timeout.
   };
 
   void hold(const BufferHandle& buffer);
   void drop(const BufferHandle& buffer);
   void reclaim(const BufferHandle& buffer);
   void retry(const OperationId& operation, const OperationRecord& record);
+  void track(const OperationId& operation, OperationRecord record);
+  std::optional<OperationId> attribute(const TransferRoute& route) const;
 
   TraceRecorder& recorder_;
   BufferPool& pool_;
@@ -229,11 +306,26 @@ class CacheHost {
   std::map<OperationId, OperationRecord> operations_;
   std::map<RequestId, std::vector<BufferHandle>> consumers_;
   std::set<StateId> published_;
+  std::map<TransferRoute, OperationId> routes_;
+  std::map<std::string, OperationId> tags_;  // Latest operation with each tag.
   std::vector<Hazard> hazards_;
   std::size_t failed_publications_ = 0;
+  std::size_t misattributions_ = 0;
+};
+
+enum class ScenarioKind {
+  // Two requests share a cached prefix; see async_copy.cpp.
+  SharedPrefix,
+  // A load is in flight when the endpoint reconnects, and a second load gets
+  // the same tag in the new epoch.
+  Reconnect,
+  // A load times out and is retried into a new cache buffer while the
+  // original copy may still run.
+  TimeoutRetry,
 };
 
 struct ScenarioOptions {
+  ScenarioKind kind = ScenarioKind::SharedPrefix;
   HostOptions host;
   EngineOptions engine;
   std::size_t capture_capacity = 1024;
@@ -244,13 +336,19 @@ struct ScenarioRun {
   CaptureStats capture;
   std::vector<Hazard> hazards;
   std::size_t failed_publications = 0;
-  // Whether request-2 received the bytes that were staged for prefix-1.
+  std::size_t misattributions = 0;
+  std::size_t unacknowledged = 0;
+  // Whether the scenario's checked request received the bytes that were
+  // staged for the state it consumed: request-2 and prefix-1 in the shared
+  // prefix scenario, request-1 and prefix-2 after a reconnect, request-1 and
+  // prefix-1 after a timeout.
   bool delivered_intact = false;
   // The actions in the order they ran, for reporting a failing schedule.
   std::vector<std::string> schedule;
 };
 
-// Runs the shared-prefix scenario described in async_copy.cpp. At each point
+// Runs the scenario described in async_copy.cpp. Routed scenarios use
+// endpoint "peer-a" unless the engine options name one. At each point
 // the options are, in order: the host's next step (when what it waits for has
 // been notified), processing queued notifications (when there are any), and
 // completing each pending copy in submission order. choices[i] selects the

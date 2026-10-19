@@ -457,6 +457,245 @@ void test_harness_trace_reduces_to_witness() {
   require(report.status == CheckStatus::Violation, "reduced harness trace is not a violation");
 }
 
+bool has_witness(const Diagnostic& diagnostic, const std::string& line) {
+  return std::find(diagnostic.witness.begin(), diagnostic.witness.end(), line) !=
+         diagnostic.witness.end();
+}
+
+void test_routed_engine_contract() {
+  require_throws<std::invalid_argument>(
+      [] {
+        TraceRecorder recorder(8);
+        BufferPool pool(recorder, 2, 4);
+        EngineOptions options;
+        options.reports_completion = false;
+        options.endpoint = EndpointId("peer-a");
+        CopyEngine engine(recorder, pool, options);
+      },
+      "a routed engine without completion reports was accepted");
+  {
+    TraceRecorder recorder(8);
+    BufferPool pool(recorder, 2, 4);
+    CopyEngine engine(recorder, pool);
+    require_throws<std::logic_error>([&] { engine.reconnect(); },
+                                     "an engine without an endpoint reconnected");
+  }
+
+  TraceRecorder recorder(64);
+  BufferPool pool(recorder, 4, 4);
+  EngineOptions options;
+  options.endpoint = EndpointId("peer-a");
+  options.redeliver_on_reconnect = true;
+  CopyEngine engine(recorder, pool, options);
+  const auto a = pool.acquire();
+  const auto b = pool.acquire();
+  const auto c = pool.acquire();
+  const auto d = pool.acquire();
+  const auto first = engine.submit(OperationId("copy-1"), RequestId("r"), a, b);
+  const auto second = engine.submit(OperationId("copy-2"), RequestId("r"), c, d);
+  const TransferRoute route_1_1{EndpointId("peer-a"), 1, "1"};
+  const TransferRoute route_1_2{EndpointId("peer-a"), 1, "2"};
+  require(first == route_1_1 && second == route_1_2, "routes are not counted per epoch");
+
+  engine.complete(OperationId("copy-1"));
+  const auto notified = engine.poll();
+  require(notified && notified->operation.value == "copy-1" && notified->route == route_1_1 &&
+              notified->outcome == AccessOutcome::Succeeded,
+          "notification does not name its route");
+
+  // copy-2 is still running when the endpoint reconnects. Its notification
+  // keeps its epoch-1 route, and copy-1's is delivered again.
+  engine.reconnect();
+  engine.complete(OperationId("copy-2"));
+  std::vector<Notification> after;
+  while (auto n = engine.poll()) after.push_back(*n);
+  require(after.size() == 2 && after[0].route == route_1_1 && after[1].route == route_1_2,
+          "reconnect must redeliver epoch-1 notifications and keep late routes");
+
+  engine.reconnect();
+  require(!engine.has_notifications(),
+          "a late epoch-1 notification must not be redelivered after epoch 2");
+
+  const auto trace = recorder.finish();
+  require(std::holds_alternative<ConnectEndpointEvent>(trace.events.front()),
+          "a routed engine must record its first epoch before any submission");
+  require(!completion_of(trace, "copy-1") && !completion_of(trace, "copy-2"),
+          "a routed engine recorded a completion itself");
+  require(std::count_if(trace.events.begin(), trace.events.end(), [](const Event& e) {
+            return std::holds_alternative<ConnectEndpointEvent>(e);
+          }) == 3,
+          "each epoch must be recorded once");
+}
+
+// Ground truth for the routed scenarios: the harness knows which operation
+// each notification came from, which reclaims were unsafe, and which
+// operations the host never credited. The checker sees only the events.
+struct RoutedTally {
+  std::size_t runs = 0;
+  std::size_t clean = 0;
+  std::size_t misattributed = 0;
+  std::size_t unsafe = 0;
+  std::size_t corrupted = 0;
+  std::size_t lost = 0;
+  std::size_t lost_only = 0;  // Lost a completion without misattributing one.
+};
+
+void tally(RoutedTally& t, const ScenarioRun& run) {
+  ++t.runs;
+  if (check(run.trace).clean()) ++t.clean;
+  if (run.misattributions > 0) ++t.misattributed;
+  if (!run.hazards.empty()) ++t.unsafe;
+  if (!run.delivered_intact) ++t.corrupted;
+  if (run.unacknowledged > 0) ++t.lost;
+  if (run.unacknowledged > 0 && run.misattributions == 0) ++t.lost_only;
+}
+
+void print(const char* name, const RoutedTally& t) {
+  std::cout << "  " << name << ": " << t.runs << " schedules, " << t.clean << " clean, "
+            << t.misattributed << " misattributed, " << t.unsafe << " unsafe reclaim, "
+            << t.corrupted << " corrupted, " << t.lost << " lost a completion ("
+            << t.lost_only << " without misattribution)\n";
+}
+
+void require_correct_host(const ScenarioRun& run, const char* name) {
+  const auto report = check(run.trace);
+  require(report.clean() && run.hazards.empty() && run.delivered_intact &&
+              run.misattributions == 0 && run.unacknowledged == 0,
+          std::string(name) + " schedule is not clean and intact: " + describe(report) +
+              describe(run));
+}
+
+// A host that credits a notification to the wrong operation must be reported
+// at that completion. A host that drops a real completion as a repeat leaves
+// an operation without an observed completion: the checker cannot see the
+// dropped message and must report the trace inconclusive, not clean.
+void require_attribution_verdict(const ScenarioRun& run, const char* owner) {
+  const auto report = check(run.trace);
+  const auto* first = first_confirmed_finding(report);
+  if (run.misattributions == 0) {
+    require(first == nullptr && run.hazards.empty() && run.delivered_intact,
+            "a schedule without misattribution has a finding: " + describe(report) +
+                describe(run));
+    require(report.clean() == (run.unacknowledged == 0),
+            std::string(run.unacknowledged > 0 ? "a lost completion was reported clean: "
+                                               : "a correct schedule is not clean: ") +
+                describe(report) + describe(run));
+    return;
+  }
+  require(report.status == CheckStatus::Violation && first != nullptr &&
+              first->category == DiagnosticCategory::MisattributedCompletion &&
+              first->message.find(std::string("operation ") + owner) != std::string::npos,
+          "the misattributed completion is not the first finding: " + describe(report) +
+              describe(run));
+}
+
+void test_reconnect_attribution() {
+  for (const bool redeliver : {false, true}) {
+    ScenarioOptions route;
+    route.kind = ScenarioKind::Reconnect;
+    route.engine.redeliver_on_reconnect = redeliver;
+    ScenarioOptions tag_only = route;
+    tag_only.host.attribution = Attribution::TagOnly;
+
+    RoutedTally correct;
+    std::size_t late_old_epoch = 0;
+    explore_scenario(route, [&](const ScenarioRun& run) {
+      require_correct_host(run, "route-checked reconnect");
+      tally(correct, run);
+      const auto reconnect = find_event(run.trace, [](const Event& e) {
+        const auto* c = std::get_if<ConnectEndpointEvent>(&e);
+        return c != nullptr && c->epoch == 2;
+      });
+      if (completion_of(run.trace, "load-1") > reconnect) ++late_old_epoch;
+    });
+    require(late_old_epoch > 0 && late_old_epoch < correct.runs,
+            "load-1 should complete after the reconnect only in some schedules");
+
+    RoutedTally buggy;
+    explore_scenario(tag_only, [&](const ScenarioRun& run) {
+      require_attribution_verdict(run, "load-1");
+      tally(buggy, run);
+      if (run.misattributions > 0) {
+        const auto report = check(run.trace);
+        const auto* first = first_confirmed_finding(report);
+        require(has_witness(*first, "operation=load-2") &&
+                    has_witness(*first, "evidence=peer-a:1:1"),
+                "the finding does not name load-2 and the epoch-1 evidence" + describe(run));
+      }
+    });
+    const auto label = std::string(redeliver ? "with" : "without") + " redelivery";
+    print(("reconnect, route-checked host, " + label).c_str(), correct);
+    print(("reconnect, tag-only host, " + label).c_str(), buggy);
+    require(buggy.misattributed > 0 && buggy.misattributed < buggy.runs,
+            "the tag-only host should misattribute only in some schedules");
+    require(buggy.unsafe > 0 && buggy.corrupted > 0,
+            "a misattributed completion should cause an unsafe reclaim and corrupt data");
+    require(buggy.lost_only > 0 && buggy.clean > 0,
+            "the tag-only host should also lose a completion, or stay correct, in some orders");
+  }
+}
+
+void test_timeout_and_retry() {
+  ScenarioOptions wait;
+  wait.kind = ScenarioKind::TimeoutRetry;
+  ScenarioOptions reclaim = wait;
+  reclaim.host.timeout = TimeoutPolicy::Reclaim;
+  ScenarioOptions latest = wait;
+  latest.host.attribution = Attribution::LatestAttempt;
+
+  RoutedTally waiting;
+  std::size_t original_after_publish = 0;
+  explore_scenario(wait, [&](const ScenarioRun& run) {
+    require_correct_host(run, "waiting timeout");
+    tally(waiting, run);
+    const auto published = find_event(run.trace, [](const Event& e) {
+      return std::holds_alternative<PublishEvent>(e);
+    });
+    if (completion_of(run.trace, "load-1") > published) ++original_after_publish;
+  });
+  require(original_after_publish > 0 && original_after_publish < waiting.runs,
+          "the original load should outlive the retry's publication only in some schedules");
+  print("timeout, host waits for the late completion", waiting);
+
+  RoutedTally reclaiming;
+  explore_scenario(reclaim, [&](const ScenarioRun& run) {
+    tally(reclaiming, run);
+    const auto report = check(run.trace);
+    const auto* first = first_confirmed_finding(report);
+    require(!run.hazards.empty() && report.status == CheckStatus::Violation &&
+                first != nullptr && first->category == DiagnosticCategory::PrematureReclaim &&
+                first->message.find("load-1 expired: timeout") != std::string::npos,
+            "reclaiming on timeout was not reported as an expired lease: " + describe(report) +
+                describe(run));
+    const auto expected = to_ref(run.hazards.front().buffer);
+    require(has_witness(*first, "allocation=" + expected.allocation.value),
+            "the finding does not name the first unsafe reclaim" + describe(run));
+  });
+  require(reclaiming.unsafe == reclaiming.runs && reclaiming.clean == 0,
+          "reclaiming on timeout must be unsafe in every schedule");
+  print("timeout, host reclaims on timeout", reclaiming);
+
+  RoutedTally crediting;
+  explore_scenario(latest, [&](const ScenarioRun& run) {
+    tally(crediting, run);
+    const auto report = check(run.trace);
+    require_attribution_verdict(run, "load-1");
+    if (run.misattributions > 0) {
+      require(has_witness(*first_confirmed_finding(report), "operation=load-1-retry"),
+              "the finding does not name the retry" + describe(run));
+    } else {
+      // The retry was credited first, so the host dropped the original's
+      // real completion as a repeat.
+      require(run.unacknowledged > 0, "the original's completion was not lost" + describe(run));
+    }
+  });
+  require(crediting.clean == 0 && crediting.misattributed > 0 && crediting.lost_only > 0 &&
+              crediting.misattributed + crediting.lost_only == crediting.runs,
+          "the latest-attempt host should misattribute in some schedules and lose the "
+          "original's completion in the rest");
+  print("timeout, original completion credited to the retry", crediting);
+}
+
 }  // namespace
 
 int main() {
@@ -470,6 +709,9 @@ int main() {
       {"failed loads", test_failed_loads_are_retried_or_reported},
       {"schedule choices", test_schedule_choices_are_validated_and_replayable},
       {"harness trace reduction", test_harness_trace_reduces_to_witness},
+      {"routed engine contract", test_routed_engine_contract},
+      {"reconnect attribution", test_reconnect_attribution},
+      {"timeout and retry", test_timeout_and_retry},
   };
   for (const auto& [name, test] : tests) {
     try {
