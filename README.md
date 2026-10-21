@@ -57,6 +57,8 @@ access to memory.
 
 ## Tools
 
+Optional: [LMCache static-put adapter](docs/LMCACHE.md), with CPU mocked regression checks at two pinned revisions.
+
 - `stateguard-check FILE` checks a trace.
 - `stateguard-reduce FILE` shrinks a failing trace to a small witness that
   reproduces the same diagnostic. It only deletes events, never reorders them.

@@ -443,3 +443,49 @@ to detect and reproduce.
 Relevant work includes the [TensorRT-LLM fault-injection proposal](https://github.com/NVIDIA/TensorRT-LLM/issues/18450)
 and [KV-transfer lifecycle documentation](https://nvidia.github.io/TensorRT-LLM/latest/developer-guide/kv-transfer.html).
 The project makes no claim to have invented inference testing or cache ownership.
+
+## LMCache static put adapter
+
+The [experimental adapter guide](LMCACHE.md) documents setup, hooks, and evidence
+contracts for the two revisions around upstream PR #4658. This is optional Python
+instrumentation tested with the upstream CPU mocks, not a real NIXL/GPU result.
+
+Verified on macOS 26.3.1 arm64, Python 3.11.8, torch 2.14.1 CPU, with the
+AppleClang 17 Release checker (2026-10-20):
+
+| Check | Before fix (`919fe8d`) | Fixed (`217b1d8`) |
+| --- | --- | --- |
+| Independent upstream suite | 16 failed / 8 passed | 24 passed |
+| Gated put, caller drops source reference | 5/5 `premature_reclaim` | 5/5 clean |
+| Injected put failure, known-ended mock access | 5/5 inconclusive: unresolved `cleanup-*` operation | 5/5 clean rollback |
+| Failure without quiescence proof | 1/1 inconclusive | 1/1 inconclusive |
+
+The failure result deliberately reflects the visibility contract: the vulnerable
+key stays in progress and is hidden by `contains()`, so the adapter does not invent
+a failed publication. Its pending metadata operation reports missing cleanup.
+The source case's first finding is `premature_reclaim`; subsequent findings can
+cascade after rejected lifecycle events. These reproduce the existing upstream
+regression, not a newly discovered upstream issue.
+
+Wall-clock microharness measurements, milliseconds, median [min, max], 20 measured
+repetitions after one warmup per mode, modes run sequentially:
+
+| Revision | Instrumentation off | Capture on | Capture + offline CLI checking |
+| --- | --- | --- | --- |
+| Before fix | 1.283 [1.157, 2.885] | 1.509 [1.322, 1.903] | 11.571 [10.138, 33.741] |
+| Fixed | 1.169 [1.075, 2.847] | 1.339 [1.282, 1.993] | 12.242 [10.236, 16.548] |
+
+Each sample creates the mocked backend and event-loop thread, performs one gated
+32-byte source put and metadata lookup, and tears down the loop. Capture includes
+hook setup, serialization, and restoration. Checking additionally writes a temporary
+trace and launches the CLI; its cost includes process startup and file I/O. These
+measurements are not serving throughput or latency estimates and make no production
+overhead promise. Source contents and real transfer corruption are not measured.
+Identity maps remain session-sized even when trace storage is bounded.
+
+Dependency-free checks: 13 tests, including page-generation reuse, ref-count
+transitions, restoration preserving pending progress, alias/pin rejection, schema
+validation, overflow, and eight-thread capture of 1,000 transactions. Both Release
+and ASan/UBSan checker executables accept the conformance traces. Engine concurrency
+beyond the gated put/caller pattern remains unverified. CI runs the dependency-free
+checks without installing LMCache; pinned engine reproduction is a separate command.

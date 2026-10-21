@@ -49,6 +49,8 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Test
         run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Test optional Python capture (no LMCache dependencies)
+        run: python3 -m adapters.lmcache.test_adapter --checker build/stateguard-check
   source-delivery:
     name: Test and deliver source archive
     needs: test
