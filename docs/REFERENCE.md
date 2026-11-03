@@ -257,6 +257,11 @@ code and produces a trace for the checker:
 - **Reentrancy.** `record()` never calls back into instrumented code. Its storage
   uses the standard allocator, so it cannot instrument `operator new` or `malloc`
   themselves.
+- **Timestamps.** `set_clock()` (before the first event) stamps the trace:
+  when the clock reading changes, `record()` adds a `time` event before the
+  event, and the two are kept or dropped together. `finish()` stamps the end of
+  capture. `steady_trace_clock()` reads `std::chrono::steady_clock`. The reading
+  is when the adapter recorded the event, not when a device performed it.
 - **Threads.** The recorder is not thread-safe. Capture from one thread, or
   serialize calls in an order that follows the rule above. Instrumentation can
   change the timing of the code it observes.
@@ -374,9 +379,9 @@ schedules because each has only two or three copies.
 
 Limits: the harness runs on the CPU in one thread, and its schedules are the
 completion and notification orders of one fixed scenario. It does not show that
-CUDA, RDMA, NIXL, or any serving engine emits faithful events. Requests end with
-`cancel`, because the event vocabulary has no separate event for a finished
-request. A copy fails only when the test names it in `failing_operations`, and
+CUDA, RDMA, NIXL, or any serving engine emits faithful events. Its cache host
+still ends finished requests with `cancel`; the `finish` event described under
+[Cancellation timeline](#cancellation-timeline) is not used there yet. A copy fails only when the test names it in `failing_operations`, and
 it fails the same way each time: half the bytes are written, then the failure is
 reported.
 
@@ -417,6 +422,97 @@ harness emits its own events, so the result does not show that another CUDA
 program, RDMA, NIXL, or a serving engine emits faithful events. The CUDA engine
 records only successful completions; a CUDA error stops the demo with an
 exception instead of being recorded as a failed completion.
+
+## Cancellation timeline
+
+`stateguard-timeline FILE` (and `build_timeline()` in `timeline.hpp`) reports what
+happened to the memory a cancelled request touched, and when. It reads three
+optional events; traces without them are unchanged and the checker accepts them:
+
+```text
+time|steady|1200345
+cancel_signal|request-1
+finish|request-2
+```
+
+`time` says the following events happened at that reading (nanoseconds) of the
+named monotonic clock, `cancel_signal` that the process received a cancellation
+signal, and `finish` that a request ended normally.
+
+The existing `cancel` event is the scheduler's acknowledgment. The checker
+treats `finish` like `cancel` (the request's consumer role ends), ignores
+`cancel_signal` (a signal alone releases nothing), and ignores `time`.
+
+For each request with a signal or an acknowledgment the timeline reports:
+
+| Stage | Event that proves it |
+|---|---|
+| Signal receipt | `cancel_signal` |
+| Scheduler acknowledgment | `cancel` |
+| Last access | the request's latest `consume`, or `complete` of its own operations |
+| Eligible for reuse | the allocation is retired, no lease on it is outstanding, and no consumer is live |
+| Reclaim | `reclaim` (returned to the pool, not to the operating system) |
+| Actual reuse | `allocate` of the next generation of the same allocation |
+
+An allocation generation is *cancelled-only* while it is not reclaimed, at least
+one request has consumed it or submitted an operation on it, and every such
+request has been acknowledged as cancelled. A live or finished request keeps it
+out, so a shared prefix still used by another request is not counted as waste.
+Retention is integrated per allocation generation from that point to the
+reclaim, so bytes shared by several cancelled requests are counted once.
+Retention that is still open at the end is measured to the end of capture and
+marked as a lower bound.
+
+The timeline is `incomplete` (exit code 2) when the trace has a coverage gap, an
+incomplete or missing end marker, no timestamps, a timestamp that decreases, a
+second clock, a signal without an acknowledgment, or an operation without a
+completion that touches memory of a cancelled request. Stages it cannot prove
+are printed as `unknown`. Exit code 0 means complete; 3 is an input error. The
+timeline does not check lifetimes, so run `stateguard-check` on the same trace.
+`stateguard-reduce` drops timestamps from a witness, because they never change a
+finding.
+
+`stateguard-cancellation-demo` runs one scenario on the steady clock: request-1
+loads a prefix, consumes it, and starts copying it out. Its cancellation is
+signalled and acknowledged while the copy runs, and the copy completes after an
+injected delay (`--delay-ms`, default 20). Excerpt for the delayed run:
+
+```text
+complete
+clock steady
+request request-1
+  signal +9666 ns
+  ack +9791 ns
+  last_access +23228083 ns
+  eligible +23235041 ns
+  reuse +23236791 ns
+  cancellation_to_reuse 23227125 ns
+```
+
+With a manual clock, the tests check that cancellation-to-reuse equals the
+injected scheduler and copy delays exactly. On the steady clock, the measured
+interval covered the 20 ms sleep in every run (20.2 to 25.0 ms in six runs; the
+excess is sleep overshoot). A second request that shares the prefix and finishes
+normally keeps the prefix out of the cancelled-only total. If the copy never
+completes, the timeline is `incomplete` and the checker is `inconclusive`.
+
+Capture cost, `stateguard-cancellation-demo --measure 1000` (macOS 26.3.1 arm64,
+Apple clang 17, Release; three sessions of 1000 runs each after one warmup, one
+thread, no injected delay; the scenario records 21 events):
+
+| Mode | Median per run | Min | Max |
+|---|---|---|---|
+| Capture without timestamps | 2.17 to 2.21 us | 2.08 us | 9.38 us |
+| Capture with timestamps (20 to 21 more events) | 2.58 us | 2.46 us | 46.4 us |
+| Timestamps plus building the timeline | 6.42 to 6.50 us | 6.29 us | 62.9 us |
+
+Limits: one process and one clock domain. The timeline orders events by trace
+order and does not correlate clocks across processes or devices. A timestamp is
+taken when the adapter records the event, so a device may finish earlier than
+`complete` says. An acknowledged cancellation is not proof that an engine stopped
+its work; only completions end accesses. GPU time of mixed batches is not split
+between requests. The LMCache adapter and the CUDA demo do not record timestamps
+yet.
 
 ## Scope and limitations
 

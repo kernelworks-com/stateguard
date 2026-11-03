@@ -206,6 +206,15 @@ std::string serialize_trace(const Trace& trace) {
           } else if constexpr (std::is_same_v<T, CancelRequestEvent>) {
             validate_identifier(e.request.value, "request");
             out << "cancel|" << e.request.value << '\n';
+          } else if constexpr (std::is_same_v<T, CancelSignalEvent>) {
+            validate_identifier(e.request.value, "request");
+            out << "cancel_signal|" << e.request.value << '\n';
+          } else if constexpr (std::is_same_v<T, FinishRequestEvent>) {
+            validate_identifier(e.request.value, "request");
+            out << "finish|" << e.request.value << '\n';
+          } else if constexpr (std::is_same_v<T, TimestampEvent>) {
+            validate_identifier(e.clock, "clock");
+            out << "time|" << e.clock << '|' << e.ns << '\n';
           } else if constexpr (std::is_same_v<T, CompleteAccessEvent>) {
             validate_identifier(e.operation.value, "operation");
             // A successful completion without evidence keeps the original
@@ -333,6 +342,16 @@ Trace parse_trace(std::string_view text) {
           require(fields.size() == 2, line_number, "cancel has the wrong field count");
           require_token(fields[1], line_number, "request");
           trace.events.emplace_back(CancelRequestEvent{RequestId(fields[1])});
+        } else if (kind == "cancel_signal" || kind == "finish") {
+          require(fields.size() == 2, line_number, kind + " has the wrong field count");
+          require_token(fields[1], line_number, "request");
+          if (kind == "finish") trace.events.emplace_back(FinishRequestEvent{RequestId(fields[1])});
+          else trace.events.emplace_back(CancelSignalEvent{RequestId(fields[1])});
+        } else if (kind == "time") {
+          require(fields.size() == 3, line_number, "time has the wrong field count");
+          require_token(fields[1], line_number, "clock");
+          trace.events.emplace_back(
+              TimestampEvent{fields[1], parse_uint(fields[2], line_number, "time")});
         } else if (kind == "complete") {
           require(fields.size() >= 2 && fields.size() <= 4, line_number,
                   "complete has the wrong field count");

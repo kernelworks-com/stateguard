@@ -62,6 +62,10 @@ Optional: [LMCache static-put adapter](docs/LMCACHE.md), with CPU mocked regress
 - `stateguard-check FILE` checks a trace.
 - `stateguard-reduce FILE` shrinks a failing trace to a small witness that
   reproduces the same diagnostic. It only deletes events, never reorders them.
+- `stateguard-timeline FILE` reports, for each cancelled request in a
+  timestamped trace, signal, acknowledgment, last access, reuse eligibility, and
+  actual reuse, plus memory retained only for cancelled requests
+  ([details](docs/REFERENCE.md#cancellation-timeline)).
 - `stateguard-generate --seed N [--fault NAME]` writes a deterministic synthetic
   history, optionally with one planted fault, for testing your own tooling.
 

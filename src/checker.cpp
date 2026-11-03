@@ -473,11 +473,39 @@ struct Replay {
                  "cancellation has an empty or malformed request identity");
       return;
     }
-    (void)index;
     cancelled.insert(event.request);
+    release_consumer(event.request);
+  }
+
+  void apply(const FinishRequestEvent& event, std::size_t index) {
+    if (!valid_identifier(event.request.value)) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "request finish has an empty or malformed request identity");
+      return;
+    }
+    release_consumer(event.request);
+  }
+
+  // A signal alone releases nothing: the scheduler may still use the request.
+  void apply(const CancelSignalEvent& event, std::size_t index) {
+    if (!valid_identifier(event.request.value)) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "cancellation signal has an empty or malformed request identity");
+    }
+  }
+
+  // Timestamps do not affect lifetimes; the checker uses trace order only.
+  void apply(const TimestampEvent& event, std::size_t index) {
+    if (!valid_identifier(event.clock)) {
+      diagnostic(DiagnosticCategory::InvalidStateTransition, index,
+                 "timestamp has an empty or malformed clock identity");
+    }
+  }
+
+  void release_consumer(const RequestId& request) {
     for (auto& [allocation_id, allocation] : allocations) {
       (void)allocation_id;
-      allocation.consumers.erase(event.request);
+      allocation.consumers.erase(request);
     }
   }
 
