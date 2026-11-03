@@ -72,7 +72,9 @@ Keys keys_of(const Event& event) {
           keys.insert("request:" + e.request.value);
           keys.insert("state:" + e.state.value);
           reference(e.allocation);
-        } else if constexpr (std::is_same_v<T, CancelRequestEvent>) {
+        } else if constexpr (std::is_same_v<T, CancelRequestEvent> ||
+                             std::is_same_v<T, CancelSignalEvent> ||
+                             std::is_same_v<T, FinishRequestEvent>) {
           keys.insert("request:" + e.request.value);
         } else if constexpr (std::is_same_v<T, CompleteAccessEvent>) {
           keys.insert("operation:" + e.operation.value);
@@ -85,7 +87,7 @@ Keys keys_of(const Event& event) {
                              std::is_same_v<T, ReclaimEvent>) {
           lifecycle(e.allocation);
         }
-        // Coverage gaps and end markers describe the whole capture.
+        // Coverage gaps, end markers, and timestamps describe the whole capture.
       },
       event);
   return keys;

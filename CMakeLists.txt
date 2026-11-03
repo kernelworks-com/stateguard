@@ -11,6 +11,7 @@ add_library(stateguard
   src/checker.cpp
   src/generator.cpp
   src/reducer.cpp
+  src/timeline.cpp
   src/trace.cpp
 )
 add_library(stateguard::stateguard ALIAS stateguard)
@@ -25,14 +26,14 @@ target_compile_options(stateguard PRIVATE
   $<$<CXX_COMPILER_ID:MSVC>:/W4>
 )
 
-foreach(tool check generate reduce)
+foreach(tool check generate reduce timeline)
   add_executable(stateguard-${tool} tools/stateguard_${tool}.cpp)
   target_link_libraries(stateguard-${tool} PRIVATE stateguard::stateguard)
 endforeach()
 
 # Instrumented allocator and async-copy harness used by the demo and tests.
 if(STATEGUARD_BUILD_EXAMPLES OR STATEGUARD_BUILD_TESTS)
-  add_library(stateguard-async-copy STATIC harness/async_copy.cpp)
+  add_library(stateguard-async-copy STATIC harness/async_copy.cpp harness/cancellation.cpp)
   target_include_directories(stateguard-async-copy PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/harness)
   target_link_libraries(stateguard-async-copy PUBLIC stateguard::stateguard)
   target_compile_options(stateguard-async-copy PRIVATE
@@ -64,6 +65,8 @@ if(STATEGUARD_BUILD_EXAMPLES)
   target_link_libraries(stateguard-instrumented-demo PRIVATE stateguard::stateguard)
   add_executable(stateguard-async-copy-demo examples/async_copy_demo.cpp)
   target_link_libraries(stateguard-async-copy-demo PRIVATE stateguard-async-copy)
+  add_executable(stateguard-cancellation-demo examples/cancellation_timeline_demo.cpp)
+  target_link_libraries(stateguard-cancellation-demo PRIVATE stateguard-async-copy)
 endif()
 
 if(STATEGUARD_BUILD_TESTS)
@@ -84,6 +87,8 @@ if(STATEGUARD_BUILD_TESTS)
   stateguard_add_test_suite(stateguard-generate-reduce-tests tests/test_generate_reduce.cpp)
   if(TARGET stateguard-async-copy)
     stateguard_add_test_suite(stateguard-async-copy-tests tests/test_async_copy.cpp
+      stateguard-async-copy)
+    stateguard_add_test_suite(stateguard-timeline-tests tests/test_timeline.cpp
       stateguard-async-copy)
   endif()
 
@@ -141,6 +146,37 @@ if(STATEGUARD_BUILD_TESTS)
     set_tests_properties(cli-check-harness-failed-publish PROPERTIES
       FIXTURES_REQUIRED harness_traces
       PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ failed_write_publication")
+    # Cancellation timeline on the steady clock with a 20 ms injected delay.
+    add_test(NAME cancellation-demo
+      COMMAND stateguard-cancellation-demo --delay-ms 20 --trace-dir ${cli_dir})
+    set_tests_properties(cancellation-demo PROPERTIES FIXTURES_SETUP cancel_traces)
+    foreach(name delayed shared)
+      add_test(NAME cli-check-cancel-${name}
+        COMMAND stateguard-check ${cli_dir}/cancel-${name}.sgtrace)
+      set_tests_properties(cli-check-cancel-${name} PROPERTIES
+        FIXTURES_REQUIRED cancel_traces
+        PASS_REGULAR_EXPRESSION "^clean\n$")
+    endforeach()
+    add_test(NAME cli-timeline-cancel-delayed
+      COMMAND stateguard-timeline ${cli_dir}/cancel-delayed.sgtrace)
+    set_tests_properties(cli-timeline-cancel-delayed PROPERTIES
+      FIXTURES_REQUIRED cancel_traces
+      PASS_REGULAR_EXPRESSION "^complete\nclock steady\n.*cancellation_to_reuse [0-9]+ ns")
+    add_test(NAME cli-timeline-cancel-shared
+      COMMAND stateguard-timeline ${cli_dir}/cancel-shared.sgtrace)
+    set_tests_properties(cli-timeline-cancel-shared PROPERTIES
+      FIXTURES_REQUIRED cancel_traces
+      PASS_REGULAR_EXPRESSION "not_attributed slot-1#1")
+    add_test(NAME cli-timeline-cancel-missing
+      COMMAND stateguard-timeline ${cli_dir}/cancel-missing.sgtrace)
+    set_tests_properties(cli-timeline-cancel-missing PROPERTIES
+      FIXTURES_REQUIRED cancel_traces
+      PASS_REGULAR_EXPRESSION "^incomplete\n.*incomplete: operation copy-1 of request request-1 has no observed access completion")
+    add_test(NAME cli-check-cancel-missing
+      COMMAND stateguard-check ${cli_dir}/cancel-missing.sgtrace)
+    set_tests_properties(cli-check-cancel-missing PROPERTIES
+      FIXTURES_REQUIRED cancel_traces
+      PASS_REGULAR_EXPRESSION "^inconclusive\n")
     add_test(NAME cli-reduce-harness-immediate
       COMMAND stateguard-reduce ${cli_dir}/immediate.sgtrace)
     set_tests_properties(cli-reduce-harness-immediate PROPERTIES

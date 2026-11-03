@@ -129,10 +129,41 @@ struct ConsumeEvent {
   bool operator==(const ConsumeEvent&) const = default;
 };
 
+// The scheduler acknowledged a request's cancellation and released its
+// consumer role. It does not prove that the request's submitted operations
+// stopped: only their completions do.
 struct CancelRequestEvent {
   RequestId request;
 
   bool operator==(const CancelRequestEvent&) const = default;
+};
+
+// The process received a cancellation signal for a request. The scheduler may
+// still be using the request until it acknowledges with CancelRequestEvent.
+// The checker does not act on it; the cancellation timeline does.
+struct CancelSignalEvent {
+  RequestId request;
+
+  bool operator==(const CancelSignalEvent&) const = default;
+};
+
+// A request ended normally. Like a cancellation it releases the request's
+// consumer role, but memory it leaves behind is not cancellation waste.
+struct FinishRequestEvent {
+  RequestId request;
+
+  bool operator==(const FinishRequestEvent&) const = default;
+};
+
+// The events that follow happened at `ns` nanoseconds on a monotonic clock
+// named `clock`, until the next timestamp. Readings of different clocks are
+// not comparable. The checker uses only trace order; timestamps feed the
+// cancellation timeline.
+struct TimestampEvent {
+  std::string clock;
+  std::uint64_t ns = 0;
+
+  bool operator==(const TimestampEvent&) const = default;
 };
 
 // How an operation's data access ended. Either way the operation no longer
@@ -197,7 +228,8 @@ using Event = std::variant<AllocateEvent, BindStateEvent, SubmitEvent,
                            PublishEvent, ConsumeEvent, CancelRequestEvent,
                            CompleteAccessEvent, RetireEvent, ReclaimEvent,
                            CoverageGapEvent, EndTraceEvent, ConnectEndpointEvent,
-                           ExpireOperationEvent>;
+                           ExpireOperationEvent, CancelSignalEvent,
+                           FinishRequestEvent, TimestampEvent>;
 
 struct Trace {
   static constexpr std::uint32_t schema_major = 1;
