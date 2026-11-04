@@ -95,7 +95,7 @@ echo "cmake:       $("${cmake_bin}" --version 2>/dev/null | head -n1)"
 echo "warnings:    $(grep -c 'warning:' "${log}/build.txt" 2>/dev/null || true)"
 echo "ctest:       $(grep -E 'tests passed|tests failed' "${log}/ctest.txt" 2>/dev/null || echo 'not run')"
 echo "demo repeat: ${demo_repeat}"
-echo "sweep:       $(head -n1 "${log}/sweep.txt" 2>/dev/null || echo 'not run')"
+echo "sweep:       $(grep -m1 '^synthetic sweep:' "${log}/sweep.txt" 2>/dev/null || echo 'not run')"
 if [ ${#failures[@]} -eq 0 ]; then
   echo "result:      all steps succeeded"
 else

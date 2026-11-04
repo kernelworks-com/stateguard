@@ -279,7 +279,9 @@ full record. CTest runs it with 3 seeds per fault. On this macOS machine,
 100 seeds per fault (1,200 histories, 441,552 events) matched in every case
 and 22 of 22 sampled reductions kept their finding, in 16 seconds.
 `scripts/colab_gpu_check.sh` runs it on the GPU machine after the CUDA demo
-(`STATEGUARD_SWEEP_SEEDS`, default 100; `STATEGUARD_DEMO_REPEAT`, default 20).
+(`STATEGUARD_SWEEP_SEEDS`, default 100; `STATEGUARD_DEMO_REPEAT`, default 20);
+at v0.1.0 on the T4 machine, 500 seeds per fault (6,000 histories) matched in
+every case in 33 seconds.
 
 ## Capturing events from native code
 
@@ -464,13 +466,17 @@ deferred and `premature_reclaim` for immediate reclamation on every run. Whether
 the device delivered corrupt bytes is reported but not required. CTest runs it and
 checks its traces under the `gpu` label; those tests need a CUDA device.
 
-Checked on 2026-11-04 at commit 9ee081c: Tesla T4 (compute 7.5), driver
-580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 27/27 CTest (5 `gpu` tests), no
-compiler warnings. With 64 MiB copies and 20 runs per configuration, deferred
-reclamation was `clean` in 20/20 runs and immediate reclamation was
-`premature_reclaim` in 20/20 runs, with and without a 20 ms start delay. Without
-the delay the immediate runs left the bytes intact in 20/20; with it every
-immediate run left the cache corrupted, up to all 64 MiB in one run.
+Checked on 2026-11-04 at tag v0.1.0 (commit cb2e159): Tesla T4 (compute 7.5),
+driver 580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 52/52 CTest (5 `gpu`
+tests), no compiler warnings. With 64 MiB copies and 500 runs per
+configuration, deferred reclamation was `clean` in 500/500 runs and immediate
+reclamation was `premature_reclaim` in 500/500 runs, with and without a 20 ms
+start delay. Without the delay the immediate runs left the bytes intact in
+500/500; with it every immediate run left the cache corrupted, up to all 64 MiB
+in one run. The same machine ran the synthetic sweep with 500 seeds per fault:
+6,000 histories (2,220,372 events), every verdict as planted, 22 of 22 sampled
+reductions kept their finding, in 33 seconds. An earlier check the same day at
+commit 9ee081c with 20 runs per configuration gave the same verdicts.
 
 Earlier check on 2026-10-16: Tesla T4 (compute 7.5), driver 580.82.07, CUDA 13.0, GCC
 13.3 on Ubuntu 24.04, 17/17 CTest. With 64 MiB copies and 20 runs per
@@ -683,7 +689,7 @@ What has been tested ("supported" means these checks ran, not certification):
 | Checker, capture, generator, reducer, timeline | macOS arm64 Apple Clang 17; Ubuntu 24.04 GCC 13 and Clang 18 | C++20, tests and synthetic fixtures |
 | Checker, capture, generator, reducer, timeline, demos | Windows Server 2022 (GitHub `windows-2022`), MSVC 19.44 | Release build with `/W4 /WX /permissive-`, full CTest suite; install check and Python adapter not run |
 | Install and CMake consumer | macOS arm64; Ubuntu 24.04 arm64 | Static and shared library, relocated prefix, uninstall |
-| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); last checked at commit 9ee081c |
+| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); last checked at tag v0.1.0, 500 runs per configuration |
 | LMCache static put hooks | Two pinned revisions, CPU mocked NIXL | See [LMCache static put adapter](#lmcache-static-put-adapter) |
 | Windows install and Python adapter, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
 
