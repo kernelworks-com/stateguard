@@ -78,8 +78,9 @@ To instrument your own code, start with the
 [instrumented example](examples/instrumented_demo.cpp) and the
 [public headers](include/stateguard/stateguard.hpp). `stateguard::TraceRecorder`
 captures events into a fixed-size buffer; a capture that overflows is never
-reported `clean`. The [technical reference](docs/REFERENCE.md) covers the trace
-format, every rule, the reducer, and the generator.
+reported `clean`. The [technical reference](docs/REFERENCE.md) covers every
+rule, the reducer, and the generator; the [trace format](docs/TRACE-FORMAT.md)
+is specified separately.
 
 ## Catch a reclaim bug in running code
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -613,6 +614,49 @@ void test_round_trip_and_malformed_input() {
   require(reparsed.schema == Trace::schema_major, "round-trip schema changed");
   require(reparsed.events.size() == parsed.events.size(), "round-trip event count changed");
   require(check(reparsed).status == CheckStatus::Clean, "round-trip fixture changed meaning");
+
+  // Every fixture serializes back to the same bytes, so the encoding is canonical.
+  std::size_t fixtures = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(
+           std::string(STATEGUARD_SOURCE_DIR) + "/tests/fixtures")) {
+    if (entry.path().extension() != ".sgtrace") continue;
+    const auto name = entry.path().filename().string();
+    const auto text = fixture(name.c_str());
+    require(serialize_trace(parse_trace(text)) == text,
+            "fixture did not round-trip: " + name);
+    ++fixtures;
+  }
+  require(fixtures >= 15, "fixture directory was not found");
+
+  // A generated trace with every optional field also round-trips.
+  Trace generated;
+  generated.events = {
+      TimestampEvent{"steady", 0},
+      ConnectEndpointEvent{EndpointId("peer-a"), 1},
+      AllocateEvent{AllocationId("buffer-1"), 1, 4096, "cpu"},
+      SubmitEvent{OperationId("copy-1"), RequestId("request-1"),
+                  {Lease{AllocationRef{AllocationId("buffer-1"), 1}, AccessKind::Write}},
+                  {OperationId("copy-0")}, route("peer-a", 1, "7")},
+      TimestampEvent{"steady", 18446744073709551615ULL},
+      CancelSignalEvent{RequestId("request-1")},
+      ExpireOperationEvent{OperationId("copy-1"), "timeout"},
+      CompleteAccessEvent{OperationId("copy-1"), AccessOutcome::Failed, route("peer-a", 1, "7")},
+      CompleteAccessEvent{OperationId("copy-2"), AccessOutcome::Succeeded, route("peer-a", 1, "8")},
+      CompleteAccessEvent{OperationId("copy-3"), AccessOutcome::Failed, std::nullopt},
+      FinishRequestEvent{RequestId("request-2")},
+      EndTraceEvent{false}};
+  const auto generated_text = serialize_trace(generated);
+  require(generated_text ==
+              "STATEGUARD_TRACE|1\ntime|steady|0\nconnect|peer-a|1\n"
+              "allocate|buffer-1|1|4096|cpu\n"
+              "submit|copy-1|request-1|w:buffer-1:1|copy-0|peer-a:1:7\n"
+              "time|steady|18446744073709551615\ncancel_signal|request-1\n"
+              "expire|copy-1|timeout\ncomplete|copy-1|failed|peer-a:1:7\n"
+              "complete|copy-2|succeeded|peer-a:1:8\ncomplete|copy-3|failed\n"
+              "finish|request-2\nend|incomplete\n",
+          "generated trace serialized unexpectedly");
+  require(serialize_trace(parse_trace(generated_text)) == generated_text,
+          "generated trace did not round-trip");
 
   bool rejected = false;
   try {
