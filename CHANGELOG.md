@@ -28,6 +28,17 @@ package matches versions exactly.
 - `scripts/explain_trace.py` exposes `chat_completion`, which also returns the
   decoded response (for its `usage`); `post_chat` behaves as before.
 
+## [0.1.1]
+
+Documentation-only patch release. The library, tools, and trace format are
+unchanged from 0.1.0; the installed package version is 0.1.1.
+
+### Changed
+
+- The README GPU table and the technical reference record the check at tag
+  v0.1.0 on one Tesla T4: 52/52 tests, 500 runs per CUDA demo configuration,
+  and the 6,000-history synthetic sweep.
+
 ## [0.1.0]
 
 First experimental alpha. It runs on the CPU; an optional CUDA harness has been
@@ -84,5 +95,7 @@ checked on one NVIDIA T4.
 Tested configurations are listed in
 [scope and limitations](docs/REFERENCE.md#scope-and-limitations).
 
-[Unreleased]: https://github.com/kernelworks-com/stateguard/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kernelworks-com/stateguard/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.2.0
+[0.1.1]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.1.0

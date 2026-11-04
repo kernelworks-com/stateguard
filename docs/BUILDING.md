@@ -66,7 +66,7 @@ repository.
 
 ## Install and uninstall
 
-Stateguard 0.1.0 is experimental: no ABI promise and no package-manager
+Stateguard 0.2.0 is experimental: no ABI promise and no package-manager
 integration. The GitHub Releases page carries unsigned CLI bundles for Linux
 x86_64, Linux arm64, and macOS arm64 plus a checksummed source archive as a
 convenience; building from source is the supported path. Install into a prefix
@@ -91,7 +91,7 @@ Another CMake project uses the installed package with
 `-DCMAKE_PREFIX_PATH="$HOME/.local/stateguard"`:
 
 ```cmake
-find_package(stateguard 0.1.0 EXACT CONFIG REQUIRED)
+find_package(stateguard 0.2.0 EXACT CONFIG REQUIRED)
 target_link_libraries(example PRIVATE stateguard::stateguard)
 ```
 
