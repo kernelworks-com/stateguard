@@ -29,6 +29,8 @@ target_compile_options(stateguard PRIVATE
 foreach(tool check generate reduce timeline)
   add_executable(stateguard-${tool} tools/stateguard_${tool}.cpp)
   target_link_libraries(stateguard-${tool} PRIVATE stateguard::stateguard)
+  target_compile_definitions(stateguard-${tool} PRIVATE
+    STATEGUARD_VERSION="${PROJECT_VERSION}")
 endforeach()
 
 # Instrumented allocator and async-copy harness used by the demo and tests.
@@ -119,6 +121,54 @@ if(STATEGUARD_BUILD_TESTS)
   add_test(NAME cli-reduce-clean-trace
     COMMAND stateguard-reduce ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/safe_deferred_reclaim.sgtrace)
   set_tests_properties(cli-reduce-clean-trace PROPERTIES WILL_FAIL TRUE)
+
+  # Machine-readable output, standard input, --help and --version.
+  set(fixtures ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    add_test(NAME cli-check-json-violation
+      COMMAND sh -c "\"$1\" --json \"$2\"; test $? -eq 1 || exit 9" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace)
+    add_test(NAME cli-check-json-parse
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='violation' and d['exit_code']==1, d; assert d['diagnostics'][0]['category']=='premature_reclaim', d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-clean
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='clean' and d['exit_code']==0 and d['diagnostics']==[], d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/safe_deferred_reclaim.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-unconfirmed
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='inconclusive', d; assert d['diagnostics'][0]['category']=='incomplete_evidence' and not d['diagnostics'][1]['confirmed'], d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/coverage_gap_unconfirmed.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-timeline-json
+      COMMAND sh -c "\"$1\" --json - < \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='complete', d; assert d['first_ns'] is not None and d['requests'] and d['allocations'], d; assert d['peak_cancelled_only_bytes'] >= 0, d\"" sh
+              $<TARGET_FILE:stateguard-timeline> ${fixtures}/cancellation_timeline.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-timeline-json-untimed
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['first_ns'] is None and d['last_ns'] is None, d\"" sh
+              $<TARGET_FILE:stateguard-timeline> ${fixtures}/premature_reclaim.sgtrace
+              ${Python3_EXECUTABLE})
+  endif()
+  add_test(NAME cli-check-stdin
+    COMMAND sh -c "cat \"$2\" | \"$1\" -" sh
+            $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace)
+  set_tests_properties(cli-check-stdin PROPERTIES
+    PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+  add_test(NAME cli-reduce-stdin
+    COMMAND sh -c "cat \"$2\" | \"$1\" -" sh
+            $<TARGET_FILE:stateguard-reduce> ${fixtures}/premature_reclaim.sgtrace)
+  set_tests_properties(cli-reduce-stdin PROPERTIES PASS_REGULAR_EXPRESSION "premature_reclaim")
+  add_test(NAME cli-check-quiet
+    COMMAND stateguard-check --quiet ${fixtures}/premature_reclaim.sgtrace)
+  set_tests_properties(cli-check-quiet PROPERTIES PASS_REGULAR_EXPRESSION "^violation\n$")
+  foreach(tool check generate reduce timeline)
+    add_test(NAME cli-${tool}-version COMMAND stateguard-${tool} --version)
+    set_tests_properties(cli-${tool}-version PROPERTIES
+      PASS_REGULAR_EXPRESSION "^stateguard-${tool} ${PROJECT_VERSION}\n$")
+    add_test(NAME cli-${tool}-help COMMAND stateguard-${tool} --help)
+    set_tests_properties(cli-${tool}-help PROPERTIES PASS_REGULAR_EXPRESSION "exit codes:")
+  endforeach()
 
   # Harness workflow: capture traces from the instrumented async-copy demo,
   # then check and reduce them with the offline tools.

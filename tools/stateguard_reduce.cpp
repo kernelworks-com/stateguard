@@ -1,10 +1,11 @@
 #include "stateguard/stateguard.hpp"
 
+#include "cli.hpp"
+
 #include <charconv>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,6 +17,26 @@ void usage(const char* program) {
             << " [--category NAME] [--max-checks N] [--output FILE] TRACE\n";
 }
 
+void help(const char* program) {
+  std::cout << "usage: " << program
+            << " [--category NAME] [--max-checks N] [--output FILE] TRACE\n"
+               "\n"
+               "Shrink a failing .sgtrace to a smaller trace with the same first\n"
+               "finding. TRACE may be - for standard input.\n"
+               "\n"
+               "options:\n"
+               "  --category NAME  reduce toward this diagnostic category\n"
+               "  --max-checks N   stop after N checker runs\n"
+               "  --output FILE    write the reduced trace to FILE, not stdout\n"
+               "  --help           print this help and exit\n"
+               "  --version        print the version and exit\n"
+               "\n"
+               "exit codes:\n"
+               "  0  reduced\n"
+               "  1  no reducible finding in the trace\n"
+               "  3  usage error, unreadable or malformed trace, or write error\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -24,6 +45,14 @@ int main(int argc, char** argv) {
   std::optional<std::string> path;
   for (int i = 1; i < argc; ++i) {
     const std::string_view flag = argv[i];
+    if (flag == "--help") {
+      help(argv[0]);
+      return 0;
+    }
+    if (flag == "--version") {
+      stateguard::cli::print_version("stateguard-reduce");
+      return 0;
+    }
     if (flag.starts_with("--")) {
       if (i + 1 >= argc) {
         usage(argv[0]);
@@ -63,16 +92,14 @@ int main(int argc, char** argv) {
     return 3;
   }
 
-  std::ifstream input(*path);
-  if (!input) {
+  const auto contents = stateguard::cli::read_input(*path);
+  if (!contents) {
     std::cerr << "stateguard-reduce: cannot open " << *path << '\n';
     return 3;
   }
-  const std::string contents((std::istreambuf_iterator<char>(input)),
-                             std::istreambuf_iterator<char>());
   stateguard::Trace trace;
   try {
-    trace = stateguard::parse_trace(contents);
+    trace = stateguard::parse_trace(*contents);
   } catch (const stateguard::TraceParseError& error) {
     std::cerr << "malformed_trace: " << error.what() << '\n';
     return 3;
