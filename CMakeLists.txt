@@ -172,6 +172,10 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_explain_trace.py)
     set_tests_properties(explain-trace-script PROPERTIES
       ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>")
+    # Short synthetic sweep: 3 seeds per fault, every verdict as planted.
+    add_test(NAME synthetic-sweep
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/synthetic_sweep.py
+              --build-dir $<TARGET_FILE_DIR:stateguard-check> --seeds 3 --reduce-sample 1)
   endif()
   add_test(NAME cli-check-stdin
     COMMAND sh -c "cat \"$2\" | \"$1\" -" sh

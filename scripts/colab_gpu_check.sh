@@ -5,7 +5,9 @@
 #
 # usage: colab_gpu_check.sh REF [REPOSITORY_URL]
 #
-# REF is a branch, tag, or full commit hash. Every step runs under a timeout,
+# REF is a branch, tag, or full commit hash. STATEGUARD_DEMO_REPEAT (default 20)
+# sets the demo runs per configuration and STATEGUARD_SWEEP_SEEDS (default 100)
+# the seeds per fault of the synthetic sweep. Every step runs under a timeout,
 # and no process is left running when the script exits. The work directory
 # (STATEGUARD_WORK, default /tmp/stateguard-gpu-check) is replaced on each run.
 # Exits 0 only when every step succeeded.
@@ -16,6 +18,7 @@ ref=${1:?usage: colab_gpu_check.sh REF [REPOSITORY_URL]}
 repository=${2:-https://github.com/kernelworks-com/stateguard.git}
 work=${STATEGUARD_WORK:-/tmp/stateguard-gpu-check}
 demo_repeat=${STATEGUARD_DEMO_REPEAT:-20}
+sweep_seeds=${STATEGUARD_SWEEP_SEEDS:-100}
 
 failures=()
 step() {
@@ -66,9 +69,14 @@ if [ ${#failures[@]} -eq 0 ]; then
   step ctest 900 "${ctest_bin}" --test-dir "${work}/build" --output-on-failure \
     --no-tests=error --timeout 300 >"${log}/ctest.txt" 2>&1
   tail -n 30 "${log}/ctest.txt"
-  step demo 600 "${work}/build/stateguard-cuda-copy-demo" --repeat "${demo_repeat}" \
+  step demo 1800 "${work}/build/stateguard-cuda-copy-demo" --repeat "${demo_repeat}" \
     >"${log}/demo.txt" 2>&1
   cat "${log}/demo.txt"
+  # CPU synthetic sweep on the same machine: generated histories for every
+  # plantable fault, each checked, a sample reduced.
+  step sweep 1800 python3 "${work}/src/scripts/synthetic_sweep.py" --build-dir "${work}/build" \
+    --seeds "${sweep_seeds}" --json "${log}/sweep.json" >"${log}/sweep.txt" 2>&1
+  cat "${log}/sweep.txt"
 fi
 
 echo
@@ -87,6 +95,7 @@ echo "cmake:       $("${cmake_bin}" --version 2>/dev/null | head -n1)"
 echo "warnings:    $(grep -c 'warning:' "${log}/build.txt" 2>/dev/null || true)"
 echo "ctest:       $(grep -E 'tests passed|tests failed' "${log}/ctest.txt" 2>/dev/null || echo 'not run')"
 echo "demo repeat: ${demo_repeat}"
+echo "sweep:       $(head -n1 "${log}/sweep.txt" 2>/dev/null || echo 'not run')"
 if [ ${#failures[@]} -eq 0 ]; then
   echo "result:      all steps succeeded"
 else
