@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(stateguard VERSION 0.1.0 LANGUAGES CXX)
+project(stateguard VERSION 0.1.1 LANGUAGES CXX)
 
 option(STATEGUARD_BUILD_TESTS "Build the CPU checker tests" ON)
 option(STATEGUARD_BUILD_EXAMPLES "Build the instrumented CPU example" ON)
