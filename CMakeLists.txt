@@ -167,6 +167,11 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['first_ns'] is None and d['last_ns'] is None, d\"" sh
               $<TARGET_FILE:stateguard-timeline> ${fixtures}/premature_reclaim.sgtrace
               ${Python3_EXECUTABLE})
+    # LLM-assisted explanation script, against a local stub server.
+    add_test(NAME explain-trace-script
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_explain_trace.py)
+    set_tests_properties(explain-trace-script PROPERTIES
+      ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>")
   endif()
   add_test(NAME cli-check-stdin
     COMMAND sh -c "cat \"$2\" | \"$1\" -" sh
