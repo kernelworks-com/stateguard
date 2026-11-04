@@ -667,6 +667,118 @@ terms. The reply is printed after the line
   `--checker` and `--timeline` override where the tools are found (default:
   `--build-dir`, then `PATH`); `--timeout` sets the request timeout in seconds.
 
+## Agent fix loop (experimental)
+
+`scripts/agent_fix.py` (Python 3.9+, standard library only) plants a known
+lifetime bug in a scratch copy of the async-copy harness, asks a model for a
+source patch, and lets the harness decide whether the patch fixes it:
+
+```sh
+export META_API_KEY=...
+python3 scripts/agent_fix.py --list-bugs
+python3 scripts/agent_fix.py --bug premature-reclaim --build-dir build \
+  --transcript run.json
+python3 scripts/agent_fix.py --replay docs/agent-fix/transcripts/premature-reclaim.json
+```
+
+It needs a configured and built tree with GCC or Clang: it reads the compiler
+and flags from `CMakeCache.txt`, links `libstateguard.a`, and uses
+`stateguard-check` and `stateguard-reduce` from `--build-dir`.
+
+**Planted bugs.** The harness selects its induced bugs with `HostOptions`
+switches. Flipping a switch back would be no fix, so each planted bug instead
+changes the policy code itself, in a copy of `harness/async_copy.cpp` under
+`BUILD_DIR/agent-fix/<bug>/`, so that the default (safe) options behave like
+the induced bug. The tracked file is never edited.
+
+| Bug | Configuration explored | Planted in | Induced behaviour it reproduces | What fails |
+|---|---|---|---|---|
+| `premature-reclaim` | `shared-prefix` | `CacheHost::release` | `ReclaimPolicy::Immediate` | `premature_reclaim` in all 15,982 schedules; corrupted bytes in 5,594 |
+| `counted-redelivery` | `redelivery` (every notification delivered twice) | `CacheHost::poll` | `idempotent_notifications = false` | unsafe reclaim in 13,278 of 15,982 schedules |
+| `failed-load-publish` | `failed-retry` (`load-1` fails) | `CacheHost::poll` | `publish_failed_loads = true` | `failed_write_publication` and partial bytes in all 15,982 schedules |
+| `tag-only-attribution` | `reconnect-replay` | `CacheHost::attribute` | `Attribution::TagOnly` | 65 of 68 schedules: misattributed or lost completions, unsafe reclaims |
+| `reclaim-on-timeout` | `timeout-wait` | `CacheHost::expire` | `TimeoutPolicy::Reclaim` | `premature_reclaim` after an expired lease in all 15 schedules |
+
+**What the model sees.** One chat-completions request per attempt, with a
+system prompt that holds the event rules (the event list from
+[TRACE-FORMAT.md](TRACE-FORMAT.md#events) plus four lines on leases,
+redelivery, and timeouts) and the output contract: exactly one unified diff
+against `harness/async_copy.cpp` and nothing else. The user message holds the
+planted build's exploration counts, its first failing schedule, the harness's
+ground truth for that schedule, `stateguard-check --json` on its trace, the
+`stateguard-reduce` witness, the `HostOptions` and `CacheHost` declarations,
+and the functions named in the bug table as they are after planting. It does
+not name the bug or the fix. After a rejected attempt, the next request is
+the same two messages plus a third holding the rejected reply and the new
+diagnostics (patch error, compiler errors, or the new counts, report, and
+witness), asking for a new diff against the original file. `--max-attempts` (default 5) bounds the requests.
+
+**What the model may edit.** Only the bodies of the `CacheHost` member
+functions in `harness/async_copy.cpp`, from the constructor to the scenario
+code. A diff that touches another file or anything outside that region, or that
+leaves fewer trace records (`recorder_.record`), pool calls, or ground-truth
+counters (`hazards_`, `misattributions_`, `failed_publications_`) in the region
+than the unplanted source has, is rejected before building. Hunks are applied
+by matching their context and removed lines; the line counts in hunk headers
+are ignored.
+
+**Acceptance rule.** The script rebuilds only the patched harness and links it
+into `stateguard-async-copy-explore`, then runs every schedule of the bug's
+configuration. A schedule passes when its trace checks `clean`, the checked
+request received intact bytes, and the harness reports no unsafe reclaim, no
+misattributed or unacknowledged notification, no published failed load, and
+no allocation left unreclaimed. The patch is accepted only when every schedule
+passes, and when two replays pass as well: the demo's schedule (every copy
+completes as late as the host allows) and the first schedule that failed in the
+planted build. A replay whose choices no longer exist, because the patch
+changed the host's choice points, is recorded as such and cannot reproduce.
+
+**What the model never decides.** Verdicts come from the checker and the
+harness only. The model's text is stored in the transcript but never parsed
+for claims; a reply without a diff is a rejected attempt.
+
+**Cost model.** Each attempt records `prompt_tokens` and `completion_tokens`
+from the response's `usage` and prices them at the default model's rates,
+$0.10 per million input tokens and $0.20 per million output tokens. For
+another `--model` the recorded cost uses the same rates and is wrong. The
+default model is the provider's low-price variant, whose terms allow it to
+train on inputs and outputs; the loop sends only this repository's harness
+source and synthetic traces. The five live runs in
+[docs/agent-fix](agent-fix/README.md) cost $0.0113 together; most output
+tokens were reasoning tokens.
+
+**Options and exit codes.** `--transcript FILE` writes the whole run as JSON:
+the planted results, and per attempt the messages sent, the reply, `usage`,
+token counts, cost, request and wall time, the diff as applied, the stage it
+reached, exploration and replay counts. `--replay FILE` prints a saved
+transcript at reading pace (`--pace`, seconds per line, default 0.03) without
+any network access. `--dry-run` builds the planted harness and prints the first
+request with the key redacted. `--model fake:PATH` replies with the file at
+PATH and makes no request; the tests use it. `--base-url`, `--api-key-env`,
+and `--timeout` are as in `explain_trace.py`. Exit codes: 0 fix accepted,
+1 attempts exhausted, 2 tooling error (missing build, key, or tool; a planted
+bug that does not reproduce; an API failure).
+
+**Limitations.** Five planted bugs, each a few lines in one function, with the
+`HostOptions` switch that names the safe behaviour visible to the model; the
+live results say nothing about unplanted bugs. Acceptance covers one
+configuration of one CPU scenario: a patch can pass it and still break another
+configuration, or a real transport, and the loop does not check the induced
+switches. The scratch rebuild supports GCC and Clang, not MSVC. Exploration
+is exhaustive only over the scenario's completion orders, not over other
+inputs.
+
+`stateguard-async-copy-explore --config NAME --json` is the exploration tool
+the loop builds. The CMake build also provides it, built from the tracked
+harness: it prints one JSON object with `schedules`, `passed`, `clean`,
+`violation`, `inconclusive`, `corrupted_bytes`, `unsafe_reclaim`,
+`misattributed`, `lost_completion`, `failed_publication`, `unreclaimed`, and
+`first_failure` (its index, status, first finding category, choices, and
+actions), and exits 0 when every schedule passes and 1 otherwise. `--list`
+names the 13 configurations, `--choices 0,1,0` runs one schedule,
+`--trace FILE` writes that schedule's trace, and `--failure-trace FILE` writes
+the first failing schedule's trace.
+
 ## Scope and limitations
 
 Stateguard is a diagnostic tool, not a proof that every inference result

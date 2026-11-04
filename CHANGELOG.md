@@ -7,6 +7,27 @@ package matches versions exactly.
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+- Experimental agent fix loop, `scripts/agent_fix.py`: five planted host bugs
+  in a scratch copy of the async-copy harness, a model proposes a unified diff,
+  and the patch is accepted only when every completion order of the bug's
+  configuration passes and the original failing schedules no longer fail.
+  Transcripts and costs of the first live runs (5 of 5 accepted on the first
+  attempt, $0.0113 in total) are in `docs/agent-fix/`. A CTest runs the loop
+  with a fake model, without network.
+- `stateguard-async-copy-explore`: runs every schedule of one harness
+  configuration, or one chosen schedule, and prints the counts as JSON.
+- `ScenarioRun::choices` records the option taken at each point, so a run
+  can be replayed with `run_scenario`.
+
+### Changed
+
+- `scripts/explain_trace.py` exposes `chat_completion`, which also returns the
+  decoded response (for its `usage`); `post_chat` behaves as before.
+
 ## [0.1.0]
 
 First experimental alpha. It runs on the CPU; an optional CUDA harness has been

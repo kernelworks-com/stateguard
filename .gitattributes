@@ -2,6 +2,7 @@
 *.md text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
+*.diff text eol=lf
 agent.md export-ignore
 AGENTS.md export-ignore
 AGENTS.override.md export-ignore

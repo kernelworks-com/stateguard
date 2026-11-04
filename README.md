@@ -78,6 +78,8 @@ Every tool accepts `--help`, `--version`, and `-` for standard input; `stateguar
 
 `scripts/explain_trace.py` asks an OpenAI-compatible chat endpoint to explain the first finding; trace contents leave your machine and the reply is not evidence ([details](docs/REFERENCE.md#llm-assisted-explanation)).
 
+`scripts/agent_fix.py` (experimental) plants a known lifetime bug in a scratch copy of the async-copy harness and asks a model for a patch; only the checker and an exhaustive run of every completion order can accept it. The five planted bugs, their transcripts, and token costs are in [docs/agent-fix](docs/agent-fix/README.md) ([details](docs/REFERENCE.md#agent-fix-loop-experimental)).
+
 To instrument your own code, start with the
 [instrumented example](examples/instrumented_demo.cpp) and the
 [public headers](include/stateguard/stateguard.hpp). `stateguard::TraceRecorder`

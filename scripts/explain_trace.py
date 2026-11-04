@@ -110,6 +110,11 @@ def checker_summary(report):
 
 
 def post_chat(base_url, api_key, body, timeout):
+    return chat_completion(base_url, api_key, body, timeout)[0]
+
+
+def chat_completion(base_url, api_key, body, timeout):
+    """POST one chat-completions request; return (reply text, decoded response)."""
     request = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode("utf-8"),
@@ -132,7 +137,7 @@ def post_chat(base_url, api_key, body, timeout):
         raise ExplainError("endpoint response has no choices[0].message.content") from exc
     if isinstance(content, list):  # some servers return content parts
         content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    return str(content).strip()
+    return str(content).strip(), payload
 
 
 def parse_args(argv):
