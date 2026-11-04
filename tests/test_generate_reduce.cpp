@@ -131,35 +131,35 @@ void test_legal_histories_are_clean() {
       std::set<std::string> published;
       std::set<std::string> retired;
       for (const auto& event : generated.trace.events) {
-        if (const auto* e = std::get_if<AllocateEvent>(&event)) {
-          if (e->generation >= 2) ++seen["allocation reuse"];
-        } else if (const auto* e = std::get_if<BindStateEvent>(&event)) {
-          holders[e->state.value].insert(e->allocation.allocation.value + "#" +
-                                         std::to_string(e->allocation.generation));
-          if (holders[e->state.value].size() >= 2) ++seen["state held by several allocations"];
-        } else if (const auto* e = std::get_if<SubmitEvent>(&event)) {
-          pending.insert(e->operation.value);
-          request_of[e->operation.value] = e->request.value;
-          if (e->leases.size() >= 2) ++seen["copy between allocations"];
-          if (!e->dependencies.empty()) ++seen["operation dependency"];
-        } else if (const auto* e = std::get_if<CompleteAccessEvent>(&event)) {
-          pending.erase(e->operation.value);
-          if (cancelled_requests.contains(request_of[e->operation.value])) {
+        if (const auto* alloc = std::get_if<AllocateEvent>(&event)) {
+          if (alloc->generation >= 2) ++seen["allocation reuse"];
+        } else if (const auto* bind = std::get_if<BindStateEvent>(&event)) {
+          holders[bind->state.value].insert(bind->allocation.allocation.value + "#" +
+                                            std::to_string(bind->allocation.generation));
+          if (holders[bind->state.value].size() >= 2) ++seen["state held by several allocations"];
+        } else if (const auto* submit = std::get_if<SubmitEvent>(&event)) {
+          pending.insert(submit->operation.value);
+          request_of[submit->operation.value] = submit->request.value;
+          if (submit->leases.size() >= 2) ++seen["copy between allocations"];
+          if (!submit->dependencies.empty()) ++seen["operation dependency"];
+        } else if (const auto* done = std::get_if<CompleteAccessEvent>(&event)) {
+          pending.erase(done->operation.value);
+          if (cancelled_requests.contains(request_of[done->operation.value])) {
             ++seen["completion after cancellation"];
           }
-        } else if (const auto* e = std::get_if<PublishEvent>(&event)) {
-          const auto key = e->allocation.allocation.value + "#" +
-                           std::to_string(e->allocation.generation);
+        } else if (const auto* pub = std::get_if<PublishEvent>(&event)) {
+          const auto key = pub->allocation.allocation.value + "#" +
+                           std::to_string(pub->allocation.generation);
           if (!published.insert(key).second) ++seen["duplicate publication"];
-          if (!e->completed_operation) ++seen["publication without proof"];
-        } else if (const auto* e = std::get_if<ConsumeEvent>(&event)) {
-          (void)e;
+          if (!pub->completed_operation) ++seen["publication without proof"];
+        } else if (const auto* consume = std::get_if<ConsumeEvent>(&event)) {
+          (void)consume;
           ++seen["consumption"];
-        } else if (const auto* e = std::get_if<CancelRequestEvent>(&event)) {
-          cancelled_requests.insert(e->request.value);
-        } else if (const auto* e = std::get_if<RetireEvent>(&event)) {
-          const auto key = e->allocation.allocation.value + "#" +
-                           std::to_string(e->allocation.generation);
+        } else if (const auto* cancel = std::get_if<CancelRequestEvent>(&event)) {
+          cancelled_requests.insert(cancel->request.value);
+        } else if (const auto* retire = std::get_if<RetireEvent>(&event)) {
+          const auto key = retire->allocation.allocation.value + "#" +
+                           std::to_string(retire->allocation.generation);
           if (!retired.insert(key).second) ++seen["duplicate retirement"];
         } else if (std::holds_alternative<ReclaimEvent>(event)) {
           ++seen["reclaim"];
