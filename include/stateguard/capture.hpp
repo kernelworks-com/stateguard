@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -56,8 +57,8 @@ TraceClock steady_trace_clock();
 // Reentrancy: record() never calls back into instrumented code. Its storage
 // uses the standard allocator, so the recorder must not be used to instrument
 // operator new or malloc themselves. It is not thread-safe; capture from one
-// thread, or serialize calls externally in an order that respects the rule
-// above.
+// thread, use LockedTraceRecorder, or serialize calls externally in an order
+// that respects the rule above.
 class TraceRecorder {
  public:
   // Reserves the whole buffer up front. Throws std::invalid_argument when
@@ -84,6 +85,35 @@ class TraceRecorder {
   CaptureStats stats_;
   std::optional<TraceClock> clock_;
   std::optional<std::uint64_t> last_ns_;
+};
+
+// A TraceRecorder whose calls may come from several threads. Each call holds
+// one mutex for its whole duration and has the same signature, results, and
+// exceptions as the TraceRecorder call it forwards to.
+//
+// Ordering: the trace order is the order in which callers acquire the lock.
+// The record-before-effect rule holds across threads only when the adapter
+// records while holding the lock that publishes the effect, or otherwise
+// calls record() inside its own critical section for that effect. Without
+// that, two threads' events appear in the recorder's lock order, which need
+// not match the order their effects became visible.
+//
+// Timestamps and dropped-event accounting stay exact: the clock is read, the
+// time/event pair is kept or dropped together, and the counts are updated
+// under the same lock, so readings never decrease in the trace for a
+// monotonic clock and recorded + dropped equals the number of record() calls.
+class LockedTraceRecorder {
+ public:
+  explicit LockedTraceRecorder(std::size_t capacity);
+
+  bool record(Event event);
+  void set_clock(TraceClock clock);
+  Trace finish();
+  CaptureStats stats() const;
+
+ private:
+  mutable std::mutex mutex_;
+  TraceRecorder recorder_;
 };
 
 }  // namespace stateguard

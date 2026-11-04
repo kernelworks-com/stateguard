@@ -255,9 +255,22 @@ code and produces a trace for the checker:
   event, and the two are kept or dropped together. `finish()` stamps the end of
   capture. `steady_trace_clock()` reads `std::chrono::steady_clock`. The reading
   is when the adapter recorded the event, not when a device performed it.
-- **Threads.** The recorder is not thread-safe. Capture from one thread, or
-  serialize calls in an order that follows the rule above. Instrumentation can
-  change the timing of the code it observes.
+- **Threads.** `TraceRecorder` is not thread-safe. Capture from one thread,
+  serialize calls in an order that follows the rule above, or use
+  `stateguard::LockedTraceRecorder`, which holds one mutex around `record()`,
+  `set_clock()`, `finish()`, and `stats()` with the same signatures and
+  exceptions. Its trace order is the lock acquisition order. To keep the
+  record-before-effect rule across threads, record while holding the lock that
+  publishes the effect (or call `record()` inside your own critical section for
+  it); otherwise cross-thread order is only the recorder's lock order.
+  Timestamps and dropped-event accounting stay exact: a time/event pair is kept
+  or dropped together, and readings of a monotonic clock never decrease in the
+  trace. Tested: 8 threads recording 1000 events each into a capacity of 3000,
+  with and without a manual monotonic clock (recorded + dropped equals every
+  call, one coverage gap, the checker parses the serialized trace and reports
+  `inconclusive`), plus the pair-drop case; the suite also ran clean under
+  ThreadSanitizer (clang, Debug). Instrumentation can change the timing of the
+  code it observes.
 
 An adapter that cannot observe part of the lifecycle should record its own
 `coverage_gap` before the affected events. Findings after the gap are then
@@ -545,8 +558,11 @@ Known blind spots:
 
 - A clean result does not show that an adapter captured every relevant event or
   modeled its backend's completion contract faithfully.
-- Capture changes timing. The C++ recorder is not thread-safe, and
-  multi-threaded capture is untested.
+- Capture changes timing. `TraceRecorder` is not thread-safe.
+  `LockedTraceRecorder` is tested only with synthetic events from 8 threads
+  (including under ThreadSanitizer), not with a real multi-threaded engine, and
+  its cross-thread order is the lock order unless the adapter records under the
+  lock that publishes each effect.
 - A rejected lifecycle event can cause follow-on diagnostics.
 - The CUDA engine throws on CUDA errors instead of recording a failed
   completion. The async-copy demo does not run the routed scenarios (the tests

@@ -1,6 +1,7 @@
 #include "stateguard/capture.hpp"
 
 #include <chrono>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -89,5 +90,27 @@ Trace TraceRecorder::finish() {
 }
 
 CaptureStats TraceRecorder::stats() const { return stats_; }
+
+LockedTraceRecorder::LockedTraceRecorder(std::size_t capacity) : recorder_(capacity) {}
+
+bool LockedTraceRecorder::record(Event event) {
+  const std::lock_guard lock(mutex_);
+  return recorder_.record(std::move(event));
+}
+
+void LockedTraceRecorder::set_clock(TraceClock clock) {
+  const std::lock_guard lock(mutex_);
+  recorder_.set_clock(std::move(clock));
+}
+
+Trace LockedTraceRecorder::finish() {
+  const std::lock_guard lock(mutex_);
+  return recorder_.finish();
+}
+
+CaptureStats LockedTraceRecorder::stats() const {
+  const std::lock_guard lock(mutex_);
+  return recorder_.stats();
+}
 
 }  // namespace stateguard
