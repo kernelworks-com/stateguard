@@ -571,6 +571,46 @@ Times are absolute nanoseconds on the trace's clock, not relative to
 `first_ns` as in the text output. Keys are stable within 0.x: a key is renamed
 or removed only with a changelog entry. New keys may be added.
 
+## LLM-assisted explanation
+
+`scripts/explain_trace.py` (Python 3.9+, standard library only) explains the
+first finding of a trace with an OpenAI-compatible chat endpoint:
+
+```sh
+export META_API_KEY=...
+python3 scripts/explain_trace.py --build-dir build tests/fixtures/premature_reclaim.sgtrace
+```
+
+It runs `stateguard-check --json` and, when the trace has `time|` events,
+`stateguard-timeline --json`, prints the checker's status and first finding,
+then sends one `POST <base-url>/chat/completions` request with
+`Authorization: Bearer <key>`. The request holds a fixed system prompt that
+states the event model's rules and forbids inventing findings, the full trace
+text, and the JSON reports, and asks for a plain-language explanation of the
+first finding, the ordering edge that caused it, and a fix in the producer's
+terms. The reply is printed after the line
+`LLM-assisted explanation (not evidence):`.
+
+- **Trace contents go to a third-party service.** Never send production
+  captures. Traces larger than `--max-trace-bytes` (default 65536) are refused;
+  shrink them with `stateguard-reduce` first. `--dry-run` prints the exact
+  request, key redacted, without any network access.
+- **The model's text is not a checker result.** Only the checker's status,
+  findings, and exit code are evidence. The script exits with the checker's
+  code; if the key is missing or the request fails, it prints the error on
+  stderr and exits 4, after the checker result. A missing tool, unreadable
+  trace, or refused size exits 3.
+- **Any OpenAI-compatible endpoint works.** Defaults are the Meta Model API:
+  `--base-url https://api.meta.ai/v1`, `--model muse-spark-1.3`,
+  `--api-key-env META_API_KEY`. Point `--base-url`, `--model`, and
+  `--api-key-env` at another provider or a local server to use it instead.
+  The provider also lists `muse-spark-1.3-contributor`, the same model at a
+  much lower price; its terms state that inputs and outputs are used to train
+  the provider's models and that it is rate-limited, so choose it only for
+  traces you are willing to share that way.
+  `--checker` and `--timeline` override where the tools are found (default:
+  `--build-dir`, then `PATH`); `--timeout` sets the request timeout in seconds.
+
 ## Scope and limitations
 
 Stateguard is a diagnostic tool, not a proof that every inference result
