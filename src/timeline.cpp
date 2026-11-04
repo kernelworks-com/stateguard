@@ -288,7 +288,6 @@ class Replay {
   TimelineReport finish() {
     if (!ended_) reason("trace has no end marker");
     if (!report_.first_ns && !clock_broken_) reason("trace has no timestamps");
-    const Time end = clock_broken_ ? Time{} : report_.last_ns;
 
     std::set<AllocationRef> touched;
     for (const auto& id : order_) {
@@ -315,7 +314,11 @@ class Replay {
 
     for (auto& [ref, a] : allocations_) {
       if (a.cancelled_only) {
-        close(a, end);
+        if (clock_broken_) {
+          a.since.reset();
+        } else {
+          close(a, report_.last_ns);
+        }
         a.retained_at_end = true;
       }
       report_.cancelled_only_byte_seconds += a.byte_seconds;
