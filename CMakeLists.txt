@@ -151,6 +151,14 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='inconclusive', d; assert d['diagnostics'][0]['category']=='incomplete_evidence' and not d['diagnostics'][1]['confirmed'], d\"" sh
               $<TARGET_FILE:stateguard-check> ${fixtures}/coverage_gap_unconfirmed.sgtrace
               ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-follow-on
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); f=[x['follow_on'] for x in d['diagnostics']]; assert f==[False,True,False,True,False], d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/retry_acknowledges_other_attempt.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-primary-only
+      COMMAND sh -c "\"$1\" --json --primary-only \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='violation' and d['exit_code']==1, d; assert len(d['diagnostics'])==3 and not any(x['follow_on'] for x in d['diagnostics']), d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/retry_acknowledges_other_attempt.sgtrace
+              ${Python3_EXECUTABLE})
     add_test(NAME cli-timeline-json
       COMMAND sh -c "\"$1\" --json - < \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='complete', d; assert d['first_ns'] is not None and d['requests'] and d['allocations'], d; assert d['peak_cancelled_only_bytes'] >= 0, d\"" sh
               $<TARGET_FILE:stateguard-timeline> ${fixtures}/cancellation_timeline.sgtrace
@@ -206,6 +214,17 @@ if(STATEGUARD_BUILD_TESTS)
     set_tests_properties(cli-check-harness-failed-publish PROPERTIES
       FIXTURES_REQUIRED harness_traces
       PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ failed_write_publication")
+    add_test(NAME cli-check-harness-failed-publish-follow-on
+      COMMAND stateguard-check ${cli_dir}/failed-publish.sgtrace)
+    set_tests_properties(cli-check-harness-failed-publish-follow-on PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "\n[0-9]+ invalid_state_transition \\[follow-on\\]: consumption requires")
+    add_test(NAME cli-check-harness-primary-only
+      COMMAND stateguard-check --primary-only ${cli_dir}/immediate.sgtrace)
+    set_tests_properties(cli-check-harness-primary-only PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim"
+      FAIL_REGULAR_EXPRESSION "follow-on|stale_generation|orphaned_operation")
     # Cancellation timeline on the steady clock with a 20 ms injected delay.
     add_test(NAME cancellation-demo
       COMMAND stateguard-cancellation-demo --delay-ms 20 --trace-dir ${cli_dir})

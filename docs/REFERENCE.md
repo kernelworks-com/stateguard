@@ -65,6 +65,41 @@ Publication waits for every writer lease on that allocation generation to
 complete. When a completion proof is supplied, it must identify a completed
 operation that held the matching initialization write lease.
 
+## Follow-on findings
+
+When the checker rejects an event, it does not apply it, and it keeps checking
+the rest of the trace. A later event can then fail only because the rejected
+state change is missing. Such a finding is listed with `[follow-on]`; in the API
+it has `Diagnostic::follow_on == true`. The flag never changes the status or the
+exit code, and the first finding of a trace is never a follow-on, since its
+cause is reported before it. `stateguard-check --primary-only` hides follow-on
+findings in text and JSON output.
+
+A finding is a follow-on only under one of these rules:
+
+| Rejected earlier | Later finding marked `[follow-on]` |
+|---|---|
+| `reclaim` of a generation (a `premature_reclaim`, or a reclaim without `retire`), so the generation stays live | `allocate` of that allocation fails because it is already live |
+| `allocate` of a new, higher generation because the allocation is still live | a reference to that generation fails as `stale_generation` or as an unknown allocation |
+| `publish` of a generation that was not yet published, for any reason | `consume` of that generation fails because it is not published |
+| `submit` of a new operation identity, for any reason | `orphaned_operation` for that identity: its completion, expiry, use as a dependency, or use as a publication proof |
+| `complete` whose transfer evidence does not match the operation (`misattributed_completion` or malformed evidence), so the operation stays outstanding | a dependency on that operation that has not completed, a publication that precedes its completion (as the cited proof or as an outstanding writer), and the end-of-trace `incomplete_evidence` that it has no observed completion |
+
+Other categories are never marked, because the rule would be a guess:
+`premature_reclaim` (an operation whose completion was rejected may still be
+accessing memory, so a later reclaim can be a real hazard),
+`write_through_shared_immutable_state`, `incompatible_semantic_reuse`,
+`double_completion`, `failed_write_publication`, `misattributed_completion`,
+capture gaps, and findings after rejected events not in the table (for
+example a rejected `bind_state`). A follow-on finding is still reported: the
+same event might also fail for another reason that the missing state change
+hides.
+
+In the async-copy demo's immediate-reclaim trace, 14 of 16 findings are
+follow-ons; the two primary findings are the two `premature_reclaim`s. In its
+failed-publication trace, 2 of 3 findings are follow-ons: both consumptions of
+the unpublished state.
+
 ## Failed completions
 
 A completion can record that the operation's access failed:
@@ -333,11 +368,12 @@ tests require the two to agree on every schedule:
 
 For each reclaim violation, the first confirmed finding is `premature_reclaim` for the
 first unsafe reclaim, with the matching reason (active lease or live consumer).
-After that finding, the checker reports follow-on errors: the slot is reused while
-the checker still treats the old generation as live. In the failed-publication
-run, the rejected publication is not recorded, so each later consumption of that
-state is also reported as consuming an unpublished allocation. Run
-`stateguard-reduce` to get a witness for the first failure.
+After that finding, the checker reports [follow-on findings](#follow-on-findings):
+the slot is reused while the checker still treats the old generation as live. In
+the failed-publication run, the rejected publication is not recorded, so each
+later consumption of that state is reported as a follow-on that consumes an
+unpublished allocation. Run `stateguard-reduce` to get a witness for the first
+failure.
 
 ### Routed transfers
 
@@ -538,6 +574,8 @@ input when the file argument is `-`. Without the flags below, the text output
 and the exit codes are unchanged.
 
 `stateguard-check --quiet` prints the status line only. `stateguard-check
+--primary-only` omits [follow-on findings](#follow-on-findings) from the text or
+JSON list; the status and exit code are unchanged. `stateguard-check
 --json` and `stateguard-timeline --json` print one JSON object on one line of
 stdout and exit with the same code as the text mode. Usage errors and
 unreadable or malformed traces print a message on stderr, no JSON, and exit 3.
@@ -551,7 +589,7 @@ Absent times are `null`. An allocation reference is
 | `status` | string | `clean`, `violation`, or `inconclusive` |
 | `exit_code` | number | 0, 1, or 2, as the process exits |
 | `capture_complete` | bool | the end marker says the capture was complete (`end\|complete`) |
-| `diagnostics` | list | findings in trace order, each with `index` (event), `category`, `confirmed`, `message`, and `witness` (list of strings) |
+| `diagnostics` | list | findings in trace order, each with `index` (event), `category`, `confirmed`, `follow_on`, `message`, and `witness` (list of strings) |
 
 `stateguard-timeline --json` mirrors `TimelineReport` in
 `include/stateguard/timeline.hpp`, with the same member names:
@@ -605,7 +643,9 @@ Known blind spots:
   (including under ThreadSanitizer), not with a real multi-threaded engine, and
   its cross-thread order is the lock order unless the adapter records under the
   lock that publishes each effect.
-- A rejected lifecycle event can cause follow-on diagnostics.
+- A rejected event can cause follow-on diagnostics. Only the cases in
+  [Follow-on findings](#follow-on-findings) are marked; others are listed as
+  primary findings.
 - The CUDA engine throws on CUDA errors instead of recording a failed
   completion. The async-copy demo does not run the routed scenarios (the tests
   do), and the generator does not produce routed histories.
@@ -645,7 +685,9 @@ The failure result deliberately reflects the visibility contract: the vulnerable
 key stays in progress and is hidden by `contains()`, so the adapter does not invent
 a failed publication. Its pending metadata operation reports missing cleanup.
 The source case's first finding is `premature_reclaim`; subsequent findings can
-cascade after rejected lifecycle events. These reproduce the existing upstream
+cascade after rejected lifecycle events (see
+[Follow-on findings](#follow-on-findings); the source case has not been rerun
+since that marking was added). These reproduce the existing upstream
 regression, not a newly discovered upstream issue.
 
 Wall-clock microharness measurements, milliseconds, median [min, max], 20 measured
