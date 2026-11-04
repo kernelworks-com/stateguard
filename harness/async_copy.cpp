@@ -662,6 +662,7 @@ class Scenario {
 ScenarioRun execute(const ScenarioOptions& options, const std::vector<std::size_t>& choices,
                     std::vector<std::size_t>* taken, std::vector<std::size_t>* widths) {
   Scenario scenario(options);
+  std::vector<std::size_t> path;
   for (std::size_t point = 0;; ++point) {
     const auto available = scenario.options();
     if (available.empty()) break;
@@ -671,11 +672,14 @@ ScenarioRun execute(const ScenarioOptions& options, const std::vector<std::size_
                               std::to_string(point) + " has only " +
                               std::to_string(available.size()) + " options");
     }
-    if (taken != nullptr) taken->push_back(choice);
+    path.push_back(choice);
     if (widths != nullptr) widths->push_back(available.size());
     scenario.take(available[choice]);
   }
-  return scenario.finish();
+  auto run = scenario.finish();
+  if (taken != nullptr) *taken = path;
+  run.choices = std::move(path);
+  return run;
 }
 
 }  // namespace

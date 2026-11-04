@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(stateguard VERSION 0.1.1 LANGUAGES CXX)
+project(stateguard VERSION 0.2.0 LANGUAGES CXX)
 
 option(STATEGUARD_BUILD_TESTS "Build the CPU checker tests" ON)
 option(STATEGUARD_BUILD_EXAMPLES "Build the instrumented CPU example" ON)
@@ -67,6 +67,10 @@ if(STATEGUARD_BUILD_EXAMPLES)
   target_link_libraries(stateguard-instrumented-demo PRIVATE stateguard::stateguard)
   add_executable(stateguard-async-copy-demo examples/async_copy_demo.cpp)
   target_link_libraries(stateguard-async-copy-demo PRIVATE stateguard-async-copy)
+  add_executable(stateguard-async-copy-explore examples/async_copy_explore.cpp)
+  target_link_libraries(stateguard-async-copy-explore PRIVATE stateguard-async-copy)
+  target_compile_definitions(stateguard-async-copy-explore PRIVATE
+    STATEGUARD_VERSION="${PROJECT_VERSION}")
   add_executable(stateguard-cancellation-demo examples/cancellation_timeline_demo.cpp)
   target_link_libraries(stateguard-cancellation-demo PRIVATE stateguard-async-copy)
 endif()
@@ -172,6 +176,15 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_explain_trace.py)
     set_tests_properties(explain-trace-script PROPERTIES
       ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>")
+    # Agent fix loop with the fake model: a known-good diff is accepted, a
+    # known-bad one and an edit outside the host are rejected. No network.
+    # The loop compiles its scratch harness with GCC or Clang only.
+    if(STATEGUARD_BUILD_EXAMPLES AND NOT MSVC)
+      add_test(NAME agent-fix-script
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agent_fix.py)
+      set_tests_properties(agent-fix-script PROPERTIES
+        ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>")
+    endif()
     # Short synthetic sweep: 3 seeds per fault, every verdict as planted.
     add_test(NAME synthetic-sweep
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/synthetic_sweep.py
@@ -203,6 +216,15 @@ if(STATEGUARD_BUILD_TESTS)
     add_test(NAME async-copy-demo
       COMMAND stateguard-async-copy-demo --trace-dir ${cli_dir})
     set_tests_properties(async-copy-demo PROPERTIES FIXTURES_SETUP harness_traces)
+    # Exhaustive exploration of one configuration, as JSON counts.
+    add_test(NAME async-copy-explore-safe
+      COMMAND stateguard-async-copy-explore --config shared-prefix --json)
+    set_tests_properties(async-copy-explore-safe PROPERTIES
+      PASS_REGULAR_EXPRESSION "\"schedules\":15982,\"passed\":15982,\"clean\":15982,.*\"first_failure\":null")
+    add_test(NAME async-copy-explore-immediate
+      COMMAND stateguard-async-copy-explore --config shared-prefix-immediate --json)
+    set_tests_properties(async-copy-explore-immediate PROPERTIES
+      PASS_REGULAR_EXPRESSION "\"schedules\":15982,\"passed\":0,.*\"first_failure\":\\{\"index\":0,\"status\":\"violation\",\"category\":\"premature_reclaim\"")
     add_test(NAME cli-check-harness-safe
       COMMAND stateguard-check ${cli_dir}/safe.sgtrace)
     set_tests_properties(cli-check-harness-safe PROPERTIES

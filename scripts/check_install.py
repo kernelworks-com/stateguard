@@ -50,7 +50,7 @@ def main():
     consumer.mkdir()
     (consumer / 'CMakeLists.txt').write_text('''cmake_minimum_required(VERSION 3.20)
 project(consumer LANGUAGES CXX)
-find_package(stateguard 0.1.1 EXACT CONFIG REQUIRED)
+find_package(stateguard 0.2.0 EXACT CONFIG REQUIRED)
 add_executable(consumer main.cpp)
 target_link_libraries(consumer PRIVATE stateguard::stateguard)
 ''')

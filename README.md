@@ -78,12 +78,14 @@ Every tool accepts `--help`, `--version`, and `-` for standard input; `stateguar
 
 `scripts/explain_trace.py` asks an OpenAI-compatible chat endpoint to explain the first finding; trace contents leave your machine and the reply is not evidence ([details](docs/REFERENCE.md#llm-assisted-explanation)).
 
+`scripts/agent_fix.py` (experimental) plants a known lifetime bug in a scratch copy of the async-copy harness and asks a model for a patch; only the checker and an exhaustive run of every completion order can accept it. The five planted bugs, their transcripts, and token costs are in [docs/agent-fix](docs/agent-fix/README.md) ([details](docs/REFERENCE.md#agent-fix-loop-experimental)).
+
 To instrument your own code, start with the
 [instrumented example](examples/instrumented_demo.cpp) and the
 [public headers](include/stateguard/stateguard.hpp). `stateguard::TraceRecorder`
 captures events into a fixed-size buffer (`LockedTraceRecorder` for several
 threads); a capture that overflows is never reported `clean`. An installed
-package is used with `find_package(stateguard 0.1.1 EXACT CONFIG)` and
+package is used with `find_package(stateguard 0.2.0 EXACT CONFIG)` and
 `stateguard::stateguard` ([install](docs/BUILDING.md#install-and-uninstall)). The [technical reference](docs/REFERENCE.md) covers every
 rule, the reducer, and the generator; the [trace format](docs/TRACE-FORMAT.md)
 is specified separately.

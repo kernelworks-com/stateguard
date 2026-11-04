@@ -1,0 +1,10 @@
+--- a/harness/async_copy.cpp
++++ b/harness/async_copy.cpp
+@@ -253,6 +253,6 @@
+ void CacheHost::release(const BufferHandle& buffer) {
+   pool_.retire(buffer);
+   auto& record = buffers_.at(buffer);
+   record.released = true;
+-  reclaim(buffer);
++  if (options_.reclaim == ReclaimPolicy::Immediate || record.holds == 0) reclaim(buffer);
+ }

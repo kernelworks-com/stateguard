@@ -345,6 +345,8 @@ struct ScenarioRun {
   bool delivered_intact = false;
   // The actions in the order they ran, for reporting a failing schedule.
   std::vector<std::string> schedule;
+  // The option taken at each point; run_scenario(options, choices) replays it.
+  std::vector<std::size_t> choices;
 };
 
 // Runs the scenario described in async_copy.cpp. Routed scenarios use

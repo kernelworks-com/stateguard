@@ -1,0 +1,339 @@
+{
+ "bug": "premature-reclaim",
+ "config": "shared-prefix",
+ "induced": "ReclaimPolicy::Immediate (demo configuration 'immediate')",
+ "symptom": "release() reclaims a buffer at once, while a copy or a consuming request still holds it: premature_reclaim in every shared-prefix schedule, and request-2 receives overwritten bytes in some.",
+ "model": "muse-spark-1.3-contributor",
+ "max_attempts": 5,
+ "prices_usd_per_million": {
+  "input": 0.1,
+  "output": 0.2
+ },
+ "started": "2026-11-04T16:35:32Z",
+ "attempts": [
+  {
+   "attempt": 1,
+   "messages": [
+    {
+     "role": "system",
+     "content": "You repair lifetime bugs in a C++ prefix-cache host. The host loads staged bytes into cache buffers with an asynchronous copy engine, publishes states, lets requests consume and copy them out, and releases buffers. A test harness replays every legal completion order of a scenario, records a lifecycle trace, and a checker judges each trace. Your patch is accepted only when every schedule then checks clean, delivers intact bytes, and reclaims every buffer; nothing you say is taken as evidence.\n\nEvent rules (from docs/TRACE-FORMAT.md):\n- `allocate`: the allocation's memory becomes live at this generation. A reuse of the same allocation must use a larger generation. `domain` names where the memory lives, for example `cpu`.\n- `bind_state`: the allocation generation now holds the named logical state, described by the descriptor.\n- `submit`: an asynchronous operation started for a request. Each lease names an allocation generation the operation may read or write until it completes. Dependencies name operations it waits for. The optional route ties the operation to one backend transfer; two operations cannot share a route.\n- `publish`: the state becomes visible to consumers. The fourth field names the completed operation that wrote it, or `-` if no proof is given.\n- `consume`: a request reads the state from the allocation generation and expects the descriptor.\n- `cancel`: the scheduler acknowledged the request's cancellation and released its consumer role. It does not end the request's operations.\n- `complete`: the operation's access ended, so it no longer touches its leased memory. The outcome is `succeeded` or `failed`.\n- `connect`: the endpoint started a connection epoch, ending the previous one. Epochs of an endpoint must increase.\n- `expire`: the host stopped waiting for the operation (a timeout, an expired lease, a disconnected peer). Its leases stay held.\n- `retire`: the allocation generation takes no new users.\n- `reclaim`: the allocation generation was returned to its pool and may be reused.\nAn operation's leases are released only by its `complete`. Retire then reclaim is legal only when no lease and no consumer remains on that generation. A notification may be delivered more than once; a timeout or a new connection epoch is not proof that a copy stopped.\n\nOutput contract:\n- Reply with exactly one unified diff against harness/async_copy.cpp and nothing else: no explanation, no Markdown fences.\n- Start with the lines `--- a/harness/async_copy.cpp` and `+++ b/harness/async_copy.cpp`, then one or more hunks headed `@@ -start,count +start,count @@`. Prefix every unchanged line with a space, removed lines with `-`, added lines with `+`, and copy at least two unchanged context lines around each change exactly as shown.\n- Edit only CacheHost member function bodies (lines 177-376 of the file). The header, the scenario code, and the HostOptions defaults are fixed. The checked configuration uses the default HostOptions; keep the option switches working rather than deleting them.\n- Keep every trace record (`recorder_.record`), pool call, and harness counter (`hazards_`, `misattributions_`, `failed_publications_`)."
+    },
+    {
+     "role": "user",
+     "content": "Configuration `shared-prefix` (default HostOptions) fails in the harness.\nExploration counts: {\"schedules\": 15982, \"passed\": 0, \"clean\": 0, \"violation\": 15982, \"inconclusive\": 0, \"corrupted_bytes\": 5594, \"unsafe_reclaim\": 15982, \"misattributed\": 0, \"lost_completion\": 0, \"failed_publication\": 0, \"unreclaimed\": 0}\nFirst failing schedule (index 0, choices 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0): stage and load prefix-1; release staging-1; stage, load, and release prefix-2; complete load-1; process notifications; serve request-1; serve request-2; cancel request-1; evict prefix-1 and stage prefix-3; complete load-2; process notifications; complete send-1; process notifications; complete send-2; process notifications; finish request-2; release remaining buffers\nHarness ground truth for it: delivered_intact=False, unsafe_reclaims=3, misattributions=0, unacknowledged=0, failed_publications=0, unreclaimed=0\n\nstateguard-check --json on its trace:\n{\"status\":\"violation\",\"exit_code\":1,\"capture_complete\":true,\"diagnostics\":[{\"index\":5,\"category\":\"premature_reclaim\",\"confirmed\":true,\"follow_on\":false,\"message\":\"allocation reclaimed while obligations remain (operation lease is still active)\",\"witness\":[\"allocation=slot-0\",\"generation=1\"]},{\"index\":6,\"category\":\"invalid_state_transition\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 is already live\",\"witness\":[]},{\"index\":9,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 expected generation 1 but event uses 2\",\"witness\":[\"allocation=slot-0\",\"current_generation=1\",\"event_generation=2\"]},{\"index\":10,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 expected generation 1 but event uses 2\",\"witness\":[\"allocation=slot-0\",\"current_generation=1\",\"event_generation=2\"]},{\"index\":11,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 expected generation 1 but event uses 2\",\"witness\":[\"allocation=slot-0\",\"current_generation=1\",\"event_generation=2\"]},{\"index\":15,\"category\":\"invalid_state_transition\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 is already live\",\"witness\":[]},{\"index\":16,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 expected generation 1 but event uses 3\",\"witness\":[\"allocation=slot-0\",\"current_generation=1\",\"event_generation=3\"]},{\"index\":22,\"category\":\"premature_reclaim\",\"confirmed\":true,\"follow_on\":false,\"message\":\"allocation reclaimed while obligations remain (operation lease is still active) (live consumer remains)\",\"witness\":[\"allocation=slot-1\",\"generation=1\"]},{\"index\":23,\"category\":\"invalid_state_transition\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-1 is already live\",\"witness\":[]},{\"index\":24,\"category\":\"orphaned_operation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"completion references an unknown operation load-2\",\"witness\":[]},{\"index\":25,\"category\":\"orphaned_operation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"publication references an unknown completion operation\",\"witness\":[]},{\"index\":26,\"category\":\"orphaned_operation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"completion references an unknown operation send-1\",\"witness\":[]},{\"index\":29,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 expected generation 1 but event uses 3\",\"witness\":[\"allocation=slot-0\",\"current_generation=1\",\"event_generation=3\"]},{\"index\":30,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-0 expected generation 1 but event uses 3\",\"witness\":[\"allocation=slot-0\",\"current_generation=1\",\"event_generation=3\"]},{\"index\":35,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-1 expected generation 1 but event uses 2\",\"witness\":[\"allocation=slot-1\",\"current_generation=1\",\"event_generation=2\"]},{\"index\":36,\"category\":\"stale_generation\",\"confirmed\":true,\"follow_on\":true,\"message\":\"allocation slot-1 expected generation 1 but event uses 2\",\"witness\":[\"allocation=slot-1\",\"current_generation=1\",\"event_generation=2\"]}]}\n\nstateguard-reduce witness (reduced trace, then the finding it keeps):\nSTATEGUARD_TRACE|1\nallocate|slot-0|1|64|cpu\nallocate|slot-1|1|64|cpu\nsubmit|load-1|loader|r:slot-0:1;w:slot-1:1|\nretire|slot-0|1\nreclaim|slot-0|1\ncomplete|load-1\nend|complete\ntarget: violation premature_reclaim at event 5: allocation reclaimed while obligations remain (operation lease is still active)\n  allocation=slot-0\n  generation=1\nreduced 38 -> 7 events in 220 checks (1-minimal)\nkept original events: 0 1 3 4 5 12 37\n\nDeclarations from harness/async_copy.hpp (read-only):\nenum class ReclaimPolicy {\n  // Reclaim a released buffer only after every copy that touches it has been\n  // notified and every request consuming it has ended.\n  Deferred,\n  // Reclaim as soon as the host releases a buffer. This is the induced bug.\n  Immediate,\n};\n\nenum class Attribution {\n  // Match the whole route: endpoint, epoch, and tag.\n  Route,\n  // Match the tag alone, to the latest operation submitted with it. Tags\n  // repeat after a reconnect, so a notification from the earlier epoch\n  // acknowledges a new transfer. This is the induced bug.\n  TagOnly,\n  // Match the route, then credit the newest retry of that operation. A late\n  // completion of the original attempt then acknowledges its retry. This is\n  // the induced bug.\n  LatestAttempt,\n};\n\nenum class TimeoutPolicy {\n  // Keep an expired operation's buffers until its completion arrives.\n  Wait,\n  // Treat the timeout as the end of the operation and drop its holds, so its\n  // buffers can be reclaimed while the copy may still run. This is the induced\n  // bug.\n  Reclaim,\n};\n\nstruct HostOptions {\n  ReclaimPolicy reclaim = ReclaimPolicy::Deferred;\n  // Ignore repeated notifications for one operation. When false, every\n  // notification drops the operation's holds again. That is the induced bug.\n  bool idempotent_notifications = true;\n  // Publish a loaded state even when its load failed. That is the induced\n  // bug. Otherwise the host stages the bytes again into a new buffer and\n  // retries the load as \"<operation>-retry\".\n  bool publish_failed_loads = false;\n  // How a routed engine's notification is matched to an operation.\n  Attribution attribution = Attribution::Route;\n  // What the host does when it gives up waiting for an operation.\n  TimeoutPolicy timeout = TimeoutPolicy::Wait;\n};\n\n// A reclaim that was unsafe according to the harness's own state, which the\n// checker never sees: the engine still had a copy that could touch the\n// buffer, or a request was still consuming it.\n\nclass CacheHost {\n public:\n  CacheHost(TraceRecorder& recorder, BufferPool& pool, CopyEngine& engine,\n            HostOptions options);\n\n  BufferHandle allocate();\n  void fill(const BufferHandle& buffer, std::byte value);\n  // Binds the state to `cache` and copies `staging` into it as request\n  // \"loader\". The state is published when the load's notification is\n  // processed, unless `cache` has been released by then. The host keeps a\n  // copy of the staged bytes so that it can retry a failed load.\n  void load(const OperationId& operation, const BufferHandle& staging,\n            const BufferHandle& cache, const StateId& state,\n            const SemanticDescriptor& descriptor);\n  // Throws std::logic_error unless the state has been published.\n  void consume(const RequestId& request, const StateId& state,\n               const BufferHandle& cache, const SemanticDescriptor& descriptor);\n  void send(const OperationId& operation, const RequestId& request,\n            const BufferHandle& source, const BufferHandle& destination);\n  // Records cancel_request, the event vocabulary's release of a request's\n  // consumer role. It is used for cancelled and finished requests alike and\n  // does not release the request's submitted copies.\n  void end_request(const RequestId& request);\n  void release(const BufferHandle& buffer);\n  // Records that the host stopped waiting for the operation. Under\n  // TimeoutPolicy::Reclaim it also drops the operation's holds.\n  void expire(const OperationId& operation, const std::string& reason);\n  // Gives up on a pending load: stages its bytes again into a new staging\n  // buffer, binds the state to a new cache buffer, loads it there as\n  // \"<operation>-retry\", and releases both the new staging buffer and the\n  // original cache buffer. Returns the new cache buffer.\n  BufferHandle reload(const OperationId& operation);\n  // Processes every queued notification.\n  void poll();\n\n  bool published(const StateId& state) const { return published_.contains(state); }\n  bool notified(const OperationId& operation) const;\n  const std::vector<Hazard>& hazards() const { return hazards_; }\n  // States published from a load that failed, by the host's own record.\n  std::size_t failed_publications() const { return failed_publications_; }\n  // Notifications the host credited to an operation other than the one the\n  // engine ran, by the harness's ground truth.\n  std::size_t misattributions() const { return misattributions_; }\n  // Operations the host submitted but never credited with a notification.\n  std::size_t unacknowledged() const;\n\n private:\n  struct BufferRecord {\n    std::size_t holds = 0;  // Unnotified copies touching it, plus consumers.\n    bool released = false;\n  };\n  struct OperationRecord {\n    BufferHandle source;\n    BufferHandle destination;\n    std::optional<StateId> publishes;\n    bool notified = false;\n    std::vector<std::byte> payload;  // Staged bytes of a load, for a retry.\n    std::optional<SemanticDescriptor> descriptor{};  // Of a load's state.\n    std::optional<TransferRoute> route{};\n    std::optional<OperationId> retried_as{};\n    bool abandoned = false;  // Holds dropped on timeout.\n  };\n\n  void hold(const BufferHandle& buffer);\n  void drop(const BufferHandle& buffer);\n  void reclaim(const BufferHandle& buffer);\n  void retry(const OperationId& operation, const OperationRecord& record);\n  void track(const OperationId& operation, OperationRecord record);\n  std::optional<OperationId> attribute(const TransferRoute& route) const;\n\n  TraceRecorder& recorder_;\n  BufferPool& pool_;\n  CopyEngine& engine_;\n  HostOptions options_;\n  std::map<BufferHandle, BufferRecord> buffers_;\n  std::map<OperationId, OperationRecord> operations_;\n  std::map<RequestId, std::vector<BufferHandle>> consumers_;\n  std::set<StateId> published_;\n  std::map<TransferRoute, OperationId> routes_;\n  std::map<std::string, OperationId> tags_;  // Latest operation with each tag.\n  std::vector<Hazard> hazards_;\n  std::size_t failed_publications_ = 0;\n  std::size_t misattributions_ = 0;\n};\n\nSource region from harness/async_copy.cpp (the CacheHost functions involved):\n// harness/async_copy.cpp, line 253\nvoid CacheHost::release(const BufferHandle& buffer) {\n  pool_.retire(buffer);\n  auto& record = buffers_.at(buffer);\n  record.released = true;\n  reclaim(buffer);\n}\n\n\n// harness/async_copy.cpp, line 356\nvoid CacheHost::drop(const BufferHandle& buffer) {\n  const auto found = buffers_.find(buffer);\n  if (found == buffers_.end()) return;  // Already reclaimed.\n  auto& record = found->second;\n  if (record.holds > 0) --record.holds;\n  if (options_.reclaim == ReclaimPolicy::Deferred && record.released && record.holds == 0) {\n    reclaim(buffer);\n  }\n}\n\n\n// harness/async_copy.cpp, line 366\nvoid CacheHost::reclaim(const BufferHandle& buffer) {\n  Hazard hazard{buffer, engine_.accessing(buffer), false};\n  for (const auto& [request, held] : consumers_) {\n    (void)request;\n    if (std::find(held.begin(), held.end(), buffer) != held.end()) hazard.live_consumer = true;\n  }\n  if (hazard.pending_access || hazard.live_consumer) hazards_.push_back(hazard);\n  pool_.reclaim(buffer);\n  buffers_.erase(buffer);\n}\n\n\nWrite the unified diff that makes every schedule of this configuration pass."
+    }
+   ],
+   "completion": "--- a/harness/async_copy.cpp\n+++ b/harness/async_copy.cpp\n@@ -253,6 +253,7 @@\n void CacheHost::release(const BufferHandle& buffer) {\n   pool_.retire(buffer);\n   auto& record = buffers_.at(buffer);\n   record.released = true;\n+  if (options_.reclaim != ReclaimPolicy::Immediate && record.holds != 0) return;\n   reclaim(buffer);\n }",
+   "usage": {
+    "completion_tokens": 10130,
+    "prompt_tokens": 3555,
+    "total_tokens": 13685,
+    "completion_tokens_details": {
+     "reasoning_tokens": 10029
+    },
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "prompt_tokens": 3555,
+   "completion_tokens": 10130,
+   "cost_usd": 0.0023815,
+   "api_seconds": 81.4,
+   "wall_seconds": 84.85,
+   "diff": "--- a/harness/async_copy.cpp\n+++ b/harness/async_copy.cpp\n@@ -253,6 +253,7 @@\n void CacheHost::release(const BufferHandle& buffer) {\n   pool_.retire(buffer);\n   auto& record = buffers_.at(buffer);\n   record.released = true;\n+  if (options_.reclaim != ReclaimPolicy::Immediate && record.holds != 0) return;\n   reclaim(buffer);\n }\n",
+   "stage": "accepted",
+   "accepted": true,
+   "applied_diff": "--- a/harness/async_copy.cpp\n+++ b/harness/async_copy.cpp\n@@ -254,6 +254,7 @@\n   pool_.retire(buffer);\n   auto& record = buffers_.at(buffer);\n   record.released = true;\n+  if (options_.reclaim != ReclaimPolicy::Immediate && record.holds != 0) return;\n   reclaim(buffer);\n }\n \n",
+   "explore": {
+    "schedules": 15982,
+    "passed": 15982,
+    "clean": 15982,
+    "violation": 0,
+    "inconclusive": 0,
+    "corrupted_bytes": 0,
+    "unsafe_reclaim": 0,
+    "misattributed": 0,
+    "lost_completion": 0,
+    "failed_publication": 0,
+    "unreclaimed": 0
+   },
+   "replay": {
+    "demo_schedule": {
+     "schedules": 1,
+     "passed": 1,
+     "clean": 1,
+     "violation": 0,
+     "inconclusive": 0,
+     "corrupted_bytes": 0,
+     "unsafe_reclaim": 0,
+     "misattributed": 0,
+     "lost_completion": 0,
+     "failed_publication": 0,
+     "unreclaimed": 0
+    },
+    "failing_schedule": {
+     "schedules": 1,
+     "passed": 1,
+     "clean": 1,
+     "violation": 0,
+     "inconclusive": 0,
+     "corrupted_bytes": 0,
+     "unsafe_reclaim": 0,
+     "misattributed": 0,
+     "lost_completion": 0,
+     "failed_publication": 0,
+     "unreclaimed": 0
+    }
+   },
+   "reason": "every schedule passed and the original failure no longer reproduces"
+  }
+ ],
+ "planted": {
+  "explore": {
+   "schedules": 15982,
+   "passed": 0,
+   "clean": 0,
+   "violation": 15982,
+   "inconclusive": 0,
+   "corrupted_bytes": 5594,
+   "unsafe_reclaim": 15982,
+   "misattributed": 0,
+   "lost_completion": 0,
+   "failed_publication": 0,
+   "unreclaimed": 0
+  },
+  "first_failure": {
+   "index": 0,
+   "status": "violation",
+   "category": "premature_reclaim",
+   "delivered_intact": false,
+   "unsafe_reclaims": 3,
+   "misattributions": 0,
+   "unacknowledged": 0,
+   "failed_publications": 0,
+   "unreclaimed": 0,
+   "choices": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "schedule": [
+    "stage and load prefix-1",
+    "release staging-1",
+    "stage, load, and release prefix-2",
+    "complete load-1",
+    "process notifications",
+    "serve request-1",
+    "serve request-2",
+    "cancel request-1",
+    "evict prefix-1 and stage prefix-3",
+    "complete load-2",
+    "process notifications",
+    "complete send-1",
+    "process notifications",
+    "complete send-2",
+    "process notifications",
+    "finish request-2",
+    "release remaining buffers"
+   ]
+  },
+  "check": {
+   "status": "violation",
+   "exit_code": 1,
+   "capture_complete": true,
+   "diagnostics": [
+    {
+     "index": 5,
+     "category": "premature_reclaim",
+     "confirmed": true,
+     "follow_on": false,
+     "message": "allocation reclaimed while obligations remain (operation lease is still active)",
+     "witness": [
+      "allocation=slot-0",
+      "generation=1"
+     ]
+    },
+    {
+     "index": 6,
+     "category": "invalid_state_transition",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 is already live",
+     "witness": []
+    },
+    {
+     "index": 9,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 expected generation 1 but event uses 2",
+     "witness": [
+      "allocation=slot-0",
+      "current_generation=1",
+      "event_generation=2"
+     ]
+    },
+    {
+     "index": 10,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 expected generation 1 but event uses 2",
+     "witness": [
+      "allocation=slot-0",
+      "current_generation=1",
+      "event_generation=2"
+     ]
+    },
+    {
+     "index": 11,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 expected generation 1 but event uses 2",
+     "witness": [
+      "allocation=slot-0",
+      "current_generation=1",
+      "event_generation=2"
+     ]
+    },
+    {
+     "index": 15,
+     "category": "invalid_state_transition",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 is already live",
+     "witness": []
+    },
+    {
+     "index": 16,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 expected generation 1 but event uses 3",
+     "witness": [
+      "allocation=slot-0",
+      "current_generation=1",
+      "event_generation=3"
+     ]
+    },
+    {
+     "index": 22,
+     "category": "premature_reclaim",
+     "confirmed": true,
+     "follow_on": false,
+     "message": "allocation reclaimed while obligations remain (operation lease is still active) (live consumer remains)",
+     "witness": [
+      "allocation=slot-1",
+      "generation=1"
+     ]
+    },
+    {
+     "index": 23,
+     "category": "invalid_state_transition",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-1 is already live",
+     "witness": []
+    },
+    {
+     "index": 24,
+     "category": "orphaned_operation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "completion references an unknown operation load-2",
+     "witness": []
+    },
+    {
+     "index": 25,
+     "category": "orphaned_operation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "publication references an unknown completion operation",
+     "witness": []
+    },
+    {
+     "index": 26,
+     "category": "orphaned_operation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "completion references an unknown operation send-1",
+     "witness": []
+    },
+    {
+     "index": 29,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 expected generation 1 but event uses 3",
+     "witness": [
+      "allocation=slot-0",
+      "current_generation=1",
+      "event_generation=3"
+     ]
+    },
+    {
+     "index": 30,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-0 expected generation 1 but event uses 3",
+     "witness": [
+      "allocation=slot-0",
+      "current_generation=1",
+      "event_generation=3"
+     ]
+    },
+    {
+     "index": 35,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-1 expected generation 1 but event uses 2",
+     "witness": [
+      "allocation=slot-1",
+      "current_generation=1",
+      "event_generation=2"
+     ]
+    },
+    {
+     "index": 36,
+     "category": "stale_generation",
+     "confirmed": true,
+     "follow_on": true,
+     "message": "allocation slot-1 expected generation 1 but event uses 2",
+     "witness": [
+      "allocation=slot-1",
+      "current_generation=1",
+      "event_generation=2"
+     ]
+    }
+   ]
+  },
+  "witness": "STATEGUARD_TRACE|1\nallocate|slot-0|1|64|cpu\nallocate|slot-1|1|64|cpu\nsubmit|load-1|loader|r:slot-0:1;w:slot-1:1|\nretire|slot-0|1\nreclaim|slot-0|1\ncomplete|load-1\nend|complete\ntarget: violation premature_reclaim at event 5: allocation reclaimed while obligations remain (operation lease is still active)\n  allocation=slot-0\n  generation=1\nreduced 38 -> 7 events in 220 checks (1-minimal)\nkept original events: 0 1 3 4 5 12 37"
+ },
+ "result": {
+  "accepted": true,
+  "attempts": 1,
+  "prompt_tokens": 3555,
+  "completion_tokens": 10130,
+  "cost_usd": 0.0023815,
+  "wall_seconds": 84.85,
+  "schedules_explored": 15982,
+  "accepted_diff": "--- a/harness/async_copy.cpp\n+++ b/harness/async_copy.cpp\n@@ -254,6 +254,7 @@\n   pool_.retire(buffer);\n   auto& record = buffers_.at(buffer);\n   record.released = true;\n+  if (options_.reclaim != ReclaimPolicy::Immediate && record.holds != 0) return;\n   reclaim(buffer);\n }\n \n"
+ }
+}

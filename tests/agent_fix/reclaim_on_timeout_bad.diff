@@ -1,0 +1,8 @@
+--- a/harness/async_copy.cpp
++++ b/harness/async_copy.cpp
+@@ -300,5 +300,4 @@
+   if (!record.notified && !record.abandoned) {
+     record.abandoned = true;
+-    drop(record.source);
+     drop(record.destination);
+   }
