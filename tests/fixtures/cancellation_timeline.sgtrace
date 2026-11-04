@@ -1,0 +1,15 @@
+STATEGUARD_TRACE|1
+time|example|0
+allocate|buffer-1|1|4096|cpu
+submit|copy-1|request-1|r:buffer-1:1|
+time|example|1000
+cancel_signal|request-1
+time|example|1300
+cancel|request-1
+retire|buffer-1|1
+time|example|6300
+complete|copy-1
+reclaim|buffer-1|1
+time|example|6500
+allocate|buffer-1|2|4096|cpu
+end|complete

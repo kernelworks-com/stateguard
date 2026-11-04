@@ -51,6 +51,16 @@ jobs:
         run: ctest --test-dir build --output-on-failure --no-tests=error
       - name: Test optional Python capture (no LMCache dependencies)
         run: python3 -m adapters.lmcache.test_adapter --checker build/stateguard-check
+      - name: Verify install, downstream consumer, and uninstall
+        if: matrix.mode == 'Release'
+        run: >-
+          python3 scripts/check_install.py --workdir install-check
+          --compiler "${{ matrix.compiler }}" --cxx-flags="${{ matrix.flags }}"
+      - name: Verify shared install and relocation
+        if: matrix.mode == 'Release'
+        run: >-
+          python3 scripts/check_install.py --workdir shared-install-check --shared
+          --compiler "${{ matrix.compiler }}" --cxx-flags="${{ matrix.flags }}"
   source-delivery:
     name: Test and deliver source archive
     needs: test
@@ -73,6 +83,7 @@ jobs:
           cmake -S unpacked/source -B package-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build package-build --parallel 2
           ctest --test-dir package-build --output-on-failure --no-tests=error
+          python3 unpacked/source/scripts/check_install.py --workdir archive-install-check
       - name: Upload tested source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

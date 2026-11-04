@@ -1,4 +1,4 @@
-# Build help
+# Build, install, and CI
 
 Requires CMake 3.20 or newer and a C++20 compiler. The CPU examples need no GPU,
 model downloads, account, or third-party runtime libraries.
@@ -64,8 +64,84 @@ toolkit path). To run the whole check on a clean single-GPU machine such as Goog
 Colab, run `bash scripts/colab_gpu_check.sh <commit>` from a clone of this
 repository.
 
+## Install and uninstall
+
+Stateguard 0.1.0 is an experimental source package: no binary releases, ABI
+promise, or package-manager integration. Install into a prefix of your own:
+
+```sh
+cmake --install build --prefix "$HOME/.local/stateguard"
+export PATH="$HOME/.local/stateguard/bin:$PATH"
+stateguard-timeline "$HOME/.local/stateguard/share/stateguard/traces/cancellation_timeline.sgtrace"
+```
+
+That prints `complete` and `cancellation_to_reuse 5500 ns` (a synthetic clock).
+The install has the core library, public headers, the four CLI tools, the
+synthetic sample traces, and the license; with examples enabled (the default)
+also the instrumented, async-copy, and cancellation demos. Tests, harness
+libraries, CUDA binaries, and the Python adapter are not installed. Configure
+with `-DSTATEGUARD_BUILD_TESTS=OFF -DSTATEGUARD_BUILD_EXAMPLES=OFF` for a smaller
+install. The library is static by default; `-DBUILD_SHARED_LIBS=ON` builds a
+shared one, and installed binaries find it through a relative runtime path.
+
+Another CMake project uses the installed package with
+`-DCMAKE_PREFIX_PATH="$HOME/.local/stateguard"`:
+
+```cmake
+find_package(stateguard 0.1.0 EXACT CONFIG REQUIRED)
+target_link_libraries(example PRIVATE stateguard::stateguard)
+```
+
+The version must match exactly during the alpha.
+
+To uninstall, keep the build directory: it records installed files in
+`install_manifest.txt`, and this removes exactly those files (unrelated files and
+empty directories stay):
+
+```sh
+cmake --build build --target uninstall
+```
+
+Use one build directory per prefix, because a later install from the same build
+replaces the manifest. `DESTDIR` works if it is set for the uninstall too.
+
+`scripts/check_install.py` (Python 3.9+, standard library) checks all of this
+in a fresh directory: it builds, installs, moves the prefix (to a path with a
+space), compiles a separate consumer, runs the tools and demos, and uninstalls.
+Add `--shared` for the shared library; on macOS, pass the SDK flag above with
+`--cxx-flags`.
+
+```sh
+python3 scripts/check_install.py --workdir build-install-check
+```
+
+## Continuous integration
+
+Every pull request and push to `main` runs:
+
+| Runner | Compiler | Configuration |
+|---|---|---|
+| Ubuntu 24.04 | GCC 13 | Release, warnings as errors, install checks |
+| Ubuntu 24.04 | Clang 18 | Debug, address and undefined-behavior sanitizers |
+| macOS 14 | Apple Clang | Release, warnings as errors, install checks |
+
+No GPU or serving engine is tested. Actions are pinned to commits, and checkout
+credentials are not kept. After the tests pass on `main`, the workflow archives
+the committed source, builds, tests, and installs the extracted archive, and
+uploads `source.tar.gz` with `SHA256SUMS` for 14 days. That is a tested source
+bundle, not a release. To reproduce the GCC job:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-13 -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic -Werror"
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure --no-tests=error
+```
+
+For the sanitizer job use `clang++-18`, `Debug`, and add
+`-fsanitize=address,undefined -fno-omit-frame-pointer` to the flags.
+
 ## Report a build issue
 
 Include your operating system, compiler and CMake versions, the command you ran,
 and its error output. Remove private paths, credentials, and customer data before
-sharing logs. For the automated build matrix, see [CI details](../.github/CI.md).
+sharing logs.
