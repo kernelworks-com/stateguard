@@ -529,6 +529,48 @@ its work; only completions end accesses. GPU time of mixed batches is not split
 between requests. The LMCache adapter and the CUDA demo do not record timestamps
 yet.
 
+## Machine-readable output
+
+All four tools accept `--help` (usage, options, and exit codes on stdout, exit
+0) and `--version` (`stateguard-<tool> 0.1.0`, exit 0). `stateguard-check`,
+`stateguard-reduce`, and `stateguard-timeline` read the trace from standard
+input when the file argument is `-`. Without the flags below, the text output
+and the exit codes are unchanged.
+
+`stateguard-check --quiet` prints the status line only. `stateguard-check
+--json` and `stateguard-timeline --json` print one JSON object on one line of
+stdout and exit with the same code as the text mode. Usage errors and
+unreadable or malformed traces print a message on stderr, no JSON, and exit 3.
+Absent times are `null`. An allocation reference is
+`{"allocation": "<id>", "generation": <n>}`; a request is its id string.
+
+`stateguard-check --json`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `status` | string | `clean`, `violation`, or `inconclusive` |
+| `exit_code` | number | 0, 1, or 2, as the process exits |
+| `capture_complete` | bool | the end marker says the capture was complete (`end\|complete`) |
+| `diagnostics` | list | findings in trace order, each with `index` (event), `category`, `confirmed`, `message`, and `witness` (list of strings) |
+
+`stateguard-timeline --json` mirrors `TimelineReport` in
+`include/stateguard/timeline.hpp`, with the same member names:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `status` | string | `complete` or `incomplete` |
+| `clock` | string | the trace's clock, empty when untimed |
+| `first_ns`, `last_ns` | number or null | first and last timestamp |
+| `requests` | list | `request`, `signal_ns`, `ack_ns`, `last_access_ns`, `cancelled_only` (refs), `not_attributed` (refs), `eligible_ns`, `reuse_ns` |
+| `allocations` | list | `allocation` (ref), `bytes`, `requests`, `last_access_ns`, `eligible_ns`, `reclaim_ns`, `reuse_ns`, `reclaimed_before_eligible`, `cancelled_only`, `cancelled_only_ns`, `cancelled_only_byte_seconds`, `retained_at_end` |
+| `peak_cancelled_only_bytes` | number | deduplicated peak |
+| `cancelled_only_byte_seconds` | number | deduplicated total |
+| `incomplete` | list of strings | reasons the timeline is incomplete |
+
+Times are absolute nanoseconds on the trace's clock, not relative to
+`first_ns` as in the text output. Keys are stable within 0.x: a key is renamed
+or removed only with a changelog entry. New keys may be added.
+
 ## Scope and limitations
 
 Stateguard is a diagnostic tool, not a proof that every inference result
