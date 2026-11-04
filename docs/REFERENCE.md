@@ -549,10 +549,11 @@ What has been tested ("supported" means these checks ran, not certification):
 | Component | Tested on | Scope |
 |---|---|---|
 | Checker, capture, generator, reducer, timeline | macOS arm64 Apple Clang 17; Ubuntu 24.04 GCC 13 and Clang 18 | C++20, tests and synthetic fixtures |
+| Checker, capture, generator, reducer, timeline, demos | Windows Server 2022 (GitHub `windows-2022`), MSVC 19.44 | Release build with `/W4 /WX /permissive-`, full CTest suite; install check and Python adapter not run |
 | Install and CMake consumer | macOS arm64; Ubuntu 24.04 arm64 | Static and shared library, relocated prefix, uninstall |
 | CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); last checked at commit 9ee081c |
 | LMCache static put hooks | Two pinned revisions, CPU mocked NIXL | See [LMCache static put adapter](#lmcache-static-put-adapter) |
-| Windows, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
+| Windows install and Python adapter, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
 
 Known blind spots:
 

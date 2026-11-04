@@ -30,13 +30,11 @@ jobs:
             compiler: clang++
             mode: Release
             flags: -Wall -Wextra -Wpedantic -Werror
-          # Trial entry: the default Visual Studio generator is multi-config.
+          # The default Visual Studio generator is multi-config.
           - os: windows-2022
             compiler: cl
             mode: Release
             flags: -W4 -WX -permissive- -EHsc
-            experimental: true
-    continue-on-error: ${{ matrix.experimental == true }}
     defaults:
       run:
         shell: bash
