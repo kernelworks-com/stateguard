@@ -7,12 +7,6 @@ package matches versions exactly.
 
 ## [Unreleased]
 
-### Added
-
-- Findings that exist only because the checker rejected an earlier event are
-  marked `[follow-on]` (`Diagnostic::follow_on`, `"follow_on"` in JSON).
-  `stateguard-check --primary-only` hides them. The status is unchanged.
-
 ## [0.1.0]
 
 First experimental alpha. It runs on the CPU; an optional CUDA harness has been
@@ -47,6 +41,24 @@ checked on one NVIDIA T4.
 - Installable CMake package (`find_package(stateguard 0.1.0 EXACT CONFIG)`),
   static by default or shared with `-DBUILD_SHARED_LIBS=ON`, with an
   `uninstall` target and `scripts/check_install.py`.
+- Findings that exist only because the checker rejected an earlier event are
+  marked `[follow-on]` (`Diagnostic::follow_on`, `"follow_on"` in JSON).
+  `stateguard-check --primary-only` hides them. The status is unchanged.
+- Every tool accepts `--help`, `--version`, and `-` for standard input;
+  `stateguard-check --json` and `stateguard-timeline --json` print one JSON
+  object with documented keys; `stateguard-check --quiet` prints the status only.
+- `stateguard::LockedTraceRecorder`: a mutex-guarded recorder for capture from
+  several threads; trace order is the lock order.
+- `docs/TRACE-FORMAT.md`: the complete schema-1 `.sgtrace` specification, with
+  a test that checks every example in it.
+- `scripts/explain_trace.py`: asks an OpenAI-compatible chat endpoint to explain
+  the first finding; the reply is labelled as not evidence.
+- `scripts/synthetic_sweep.py`: generates histories for every plantable fault,
+  checks each, and reduces a sample; the Colab GPU script runs it too.
+- CI builds and tests on Windows Server 2022 with MSVC, runs an optional
+  ThreadSanitizer job, and a tag-triggered workflow builds CLI bundles for
+  Linux x86_64, Linux arm64, and macOS arm64, a source archive, and
+  `SHA256SUMS` into a draft GitHub release.
 
 Tested configurations are listed in
 [scope and limitations](docs/REFERENCE.md#scope-and-limitations).

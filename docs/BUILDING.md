@@ -66,8 +66,11 @@ repository.
 
 ## Install and uninstall
 
-Stateguard 0.1.0 is an experimental source package: no binary releases, ABI
-promise, or package-manager integration. Install into a prefix of your own:
+Stateguard 0.1.0 is experimental: no ABI promise and no package-manager
+integration. The GitHub Releases page carries unsigned CLI bundles for Linux
+x86_64, Linux arm64, and macOS arm64 plus a checksummed source archive as a
+convenience; building from source is the supported path. Install into a prefix
+of your own:
 
 ```sh
 cmake --install build --prefix "$HOME/.local/stateguard"
