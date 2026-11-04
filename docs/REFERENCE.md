@@ -8,10 +8,8 @@ Instrument allocation, transfer, retirement, and consumption boundaries; capture
 an event trace; run the checker; inspect a diagnostic tied to the relevant state
 and operation identifiers. Capture coverage and dropped events must be visible.
 
-The current fixture format is a readable, line-oriented schema with a major
-version header. It is suitable for synthetic fixtures and small captures; it is
-not an ABI promise. Fields are separated by `|`, and identifiers and text fields
-must not contain the reserved separators used by the format.
+Traces use the line-oriented `.sgtrace` format, specified field by field in
+[TRACE-FORMAT.md](TRACE-FORMAT.md).
 
 Build and run the checker with CMake and CTest:
 
@@ -75,11 +73,9 @@ A completion can record that the operation's access failed:
 complete|load-1|failed
 ```
 
-The third field is optional. `succeeded` is also accepted, and a successful
-completion is still written in the two-field form `complete|load-1`, so traces
-without failures are unchanged. A reader that predates the field rejects the
-line as malformed instead of reading the failure as a success. In the API, the
-field is `CompleteAccessEvent::outcome` (`AccessOutcome::Succeeded` or
+The outcome field and its compatibility rules are in the
+[format specification](TRACE-FORMAT.md#complete-forms). In the API, the field is
+`CompleteAccessEvent::outcome` (`AccessOutcome::Succeeded` or
 `AccessOutcome::Failed`).
 
 A failed completion still ends the access: the operation no longer touches its
@@ -114,16 +110,13 @@ expire|load-1|timeout
 complete|load-1|succeeded|peer-a:1:7
 ```
 
-- `connect|<endpoint>|<epoch>` starts a new connection epoch of a transport
-  endpoint and ends the previous one. Epochs must increase.
-- An optional sixth `submit` field, `<endpoint>:<epoch>:<tag>`, is the operation's
-  transfer route: the endpoint, its current epoch, and the backend's tag for the
-  transfer. Two operations cannot share a route. A tag can repeat in a new epoch.
-- An optional fourth `complete` field is the route that the backend's completion
-  named. The outcome field is then required, for example
-  `complete|load-1|succeeded|peer-a:1:7`.
-- `expire|<operation>|<reason>` records that the host stopped waiting for an
-  operation. The reason is free text without separators.
+`connect` starts a new connection epoch of an endpoint, the optional route
+field of `submit` names the operation's transfer (endpoint, epoch, and backend
+tag), the optional evidence field of `complete` names the route the backend's
+completion reported, and `expire` records that the host stopped waiting. The
+[format specification](TRACE-FORMAT.md#events) gives their fields. Epochs must
+increase, two operations cannot share a route, and a tag can repeat in a new
+epoch.
 
 The rules:
 
@@ -262,9 +255,22 @@ code and produces a trace for the checker:
   event, and the two are kept or dropped together. `finish()` stamps the end of
   capture. `steady_trace_clock()` reads `std::chrono::steady_clock`. The reading
   is when the adapter recorded the event, not when a device performed it.
-- **Threads.** The recorder is not thread-safe. Capture from one thread, or
-  serialize calls in an order that follows the rule above. Instrumentation can
-  change the timing of the code it observes.
+- **Threads.** `TraceRecorder` is not thread-safe. Capture from one thread,
+  serialize calls in an order that follows the rule above, or use
+  `stateguard::LockedTraceRecorder`, which holds one mutex around `record()`,
+  `set_clock()`, `finish()`, and `stats()` with the same signatures and
+  exceptions. Its trace order is the lock acquisition order. To keep the
+  record-before-effect rule across threads, record while holding the lock that
+  publishes the effect (or call `record()` inside your own critical section for
+  it); otherwise cross-thread order is only the recorder's lock order.
+  Timestamps and dropped-event accounting stay exact: a time/event pair is kept
+  or dropped together, and readings of a monotonic clock never decrease in the
+  trace. Tested: 8 threads recording 1000 events each into a capacity of 3000,
+  with and without a manual monotonic clock (recorded + dropped equals every
+  call, one coverage gap, the checker parses the serialized trace and reports
+  `inconclusive`), plus the pair-drop case; the suite also ran clean under
+  ThreadSanitizer (clang, Debug). Instrumentation can change the timing of the
+  code it observes.
 
 An adapter that cannot observe part of the lifecycle should record its own
 `coverage_gap` before the affected events. Findings after the gap are then
@@ -410,7 +416,15 @@ deferred and `premature_reclaim` for immediate reclamation on every run. Whether
 the device delivered corrupt bytes is reported but not required. CTest runs it and
 checks its traces under the `gpu` label; those tests need a CUDA device.
 
-Checked on 2026-10-16: Tesla T4 (compute 7.5), driver 580.82.07, CUDA 13.0, GCC
+Checked on 2026-11-04 at commit 9ee081c: Tesla T4 (compute 7.5), driver
+580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 27/27 CTest (5 `gpu` tests), no
+compiler warnings. With 64 MiB copies and 20 runs per configuration, deferred
+reclamation was `clean` in 20/20 runs and immediate reclamation was
+`premature_reclaim` in 20/20 runs, with and without a 20 ms start delay. Without
+the delay the immediate runs left the bytes intact in 20/20; with it every
+immediate run left the cache corrupted, up to all 64 MiB in one run.
+
+Earlier check on 2026-10-16: Tesla T4 (compute 7.5), driver 580.82.07, CUDA 13.0, GCC
 13.3 on Ubuntu 24.04, 17/17 CTest. With 64 MiB copies and 20 runs per
 configuration, the verdicts matched on every run. Without a start delay the copy
 finished before the restaging write in all 20 immediate runs, so the bytes stayed
@@ -437,7 +451,8 @@ finish|request-2
 
 `time` says the following events happened at that reading (nanoseconds) of the
 named monotonic clock, `cancel_signal` that the process received a cancellation
-signal, and `finish` that a request ended normally.
+signal, and `finish` that a request ended normally. Their fields are in the
+[format specification](TRACE-FORMAT.md#events).
 
 The existing `cancel` event is the scheduler's acknowledgment. The checker
 treats `finish` like `cancel` (the request's consumer role ends), ignores
@@ -577,7 +592,7 @@ What has been tested ("supported" means these checks ran, not certification):
 |---|---|---|
 | Checker, capture, generator, reducer, timeline | macOS arm64 Apple Clang 17; Ubuntu 24.04 GCC 13 and Clang 18 | C++20, tests and synthetic fixtures |
 | Install and CMake consumer | macOS arm64; Ubuntu 24.04 arm64 | Static and shared library, relocated prefix, uninstall |
-| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); older commits only |
+| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); last checked at commit 9ee081c |
 | LMCache static put hooks | Two pinned revisions, CPU mocked NIXL | See [LMCache static put adapter](#lmcache-static-put-adapter) |
 | Windows, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
 
@@ -585,8 +600,11 @@ Known blind spots:
 
 - A clean result does not show that an adapter captured every relevant event or
   modeled its backend's completion contract faithfully.
-- Capture changes timing. The C++ recorder is not thread-safe, and
-  multi-threaded capture is untested.
+- Capture changes timing. `TraceRecorder` is not thread-safe.
+  `LockedTraceRecorder` is tested only with synthetic events from 8 threads
+  (including under ThreadSanitizer), not with a real multi-threaded engine, and
+  its cross-thread order is the lock order unless the adapter records under the
+  lock that publishes each effect.
 - A rejected lifecycle event can cause follow-on diagnostics.
 - The CUDA engine throws on CUDA errors instead of recording a failed
   completion. The async-copy demo does not run the routed scenarios (the tests

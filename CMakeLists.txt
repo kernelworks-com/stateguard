@@ -87,6 +87,9 @@ if(STATEGUARD_BUILD_TESTS)
   endfunction()
   stateguard_add_test_suite(stateguard-tests tests/test_main.cpp)
   stateguard_add_test_suite(stateguard-generate-reduce-tests tests/test_generate_reduce.cpp)
+  find_package(Threads REQUIRED)
+  stateguard_add_test_suite(stateguard-capture-tests tests/test_capture.cpp
+    stateguard::stateguard Threads::Threads)
   if(TARGET stateguard-async-copy)
     stateguard_add_test_suite(stateguard-async-copy-tests tests/test_async_copy.cpp
       stateguard-async-copy)
@@ -122,10 +125,17 @@ if(STATEGUARD_BUILD_TESTS)
     COMMAND stateguard-reduce ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/safe_deferred_reclaim.sgtrace)
   set_tests_properties(cli-reduce-clean-trace PROPERTIES WILL_FAIL TRUE)
 
+  # Every example trace in the format specification must parse.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME docs-trace-format-examples
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_trace_format_doc.py
+              $<TARGET_FILE:stateguard-check> ${CMAKE_CURRENT_SOURCE_DIR}/docs/TRACE-FORMAT.md)
+  endif()
+
   # Machine-readable output, standard input, --help and --version.
   set(fixtures ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
-  find_package(Python3 COMPONENTS Interpreter)
-  if(Python3_FOUND)
+  if(Python3_Interpreter_FOUND)
     add_test(NAME cli-check-json-violation
       COMMAND sh -c "\"$1\" --json \"$2\"; test $? -eq 1 || exit 9" sh
               $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace)

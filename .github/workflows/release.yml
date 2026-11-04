@@ -1,0 +1,194 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to name the draft (for example v0.1.0); the dispatched commit is built
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  version:
+    name: Check tag against CMake version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Compare tag and project version
+        id: check
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PUSHED_TAG: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then tag="$INPUT_TAG"; else tag="$PUSHED_TAG"; fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag '$tag' is not of the form vX.Y.Z"
+            exit 1
+          fi
+          version="${tag#v}"
+          project=$(sed -nE 's/^project\(stateguard VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          if [ "$version" != "$project" ]; then
+            echo "::error::tag $tag does not match CMake project version '$project'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  # Same configurations as ci.yml's test job; keep them in sync.
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.mode }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            compiler: g++-13
+            mode: Release
+            flags: -Wall -Wextra -Wpedantic -Werror
+          - os: ubuntu-24.04
+            compiler: clang++-18
+            mode: Debug
+            flags: -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer
+          - os: macos-14
+            compiler: clang++
+            mode: Release
+            flags: -Wall -Wextra -Wpedantic -Werror
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Record tools
+        run: |
+          cmake --version
+          "${{ matrix.compiler }}" --version
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.mode }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Test optional Python capture (no LMCache dependencies)
+        run: python3 -m adapters.lmcache.test_adapter --checker build/stateguard-check
+      - name: Verify install, downstream consumer, and uninstall
+        if: matrix.mode == 'Release'
+        run: >-
+          python3 scripts/check_install.py --workdir install-check
+          --compiler "${{ matrix.compiler }}" --cxx-flags="${{ matrix.flags }}"
+      - name: Verify shared install and relocation
+        if: matrix.mode == 'Release'
+        run: >-
+          python3 scripts/check_install.py --workdir shared-install-check --shared
+          --compiler "${{ matrix.compiler }}" --cxx-flags="${{ matrix.flags }}"
+  bundle:
+    name: Bundle ${{ matrix.platform }}
+    needs: [version, test]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-14
+            platform: macos-arm64
+    env:
+      NAME: stateguard-${{ needs.version.outputs.version }}-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build Release CLI
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTATEGUARD_BUILD_TESTS=OFF
+          cmake --build build --parallel 2
+      - name: Install and package
+        run: |
+          cmake --install build --prefix "stage/$NAME"
+          "stage/$NAME/bin/stateguard-check" "stage/$NAME/share/stateguard/traces/safe_deferred_reclaim.sgtrace"
+          mkdir -p dist
+          tar -C stage -czf "dist/$NAME.tar.gz" "$NAME"
+          tar -tzf "dist/$NAME.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+  source:
+    name: Source archive
+    needs: [version, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NAME: stateguard-${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Archive committed source
+        run: |
+          mkdir -p dist unpacked
+          git archive --format=tar --prefix="$NAME/" HEAD | gzip -n > "dist/$NAME.tar.gz"
+          tar -xzf "dist/$NAME.tar.gz" -C unpacked
+      - name: Test extracted source
+        run: |
+          cmake -S "unpacked/$NAME" -B package-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build package-build --parallel 2
+          ctest --test-dir package-build --output-on-failure --no-tests=error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+  release:
+    name: Draft GitHub Release
+    needs: [version, bundle, source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # v4.3.0, from https://github.com/actions/download-artifact/releases/tag/v4.3.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          TARGET: ${{ github.sha }}
+        run: >-
+          gh release create "$TAG" --draft
+          --target "$TARGET" --title "Stateguard $TAG"
+          --notes "Draft for $TAG built from $TARGET. See CHANGELOG.md."
+          dist/*

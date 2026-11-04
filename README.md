@@ -80,8 +80,9 @@ To instrument your own code, start with the
 [instrumented example](examples/instrumented_demo.cpp) and the
 [public headers](include/stateguard/stateguard.hpp). `stateguard::TraceRecorder`
 captures events into a fixed-size buffer; a capture that overflows is never
-reported `clean`. The [technical reference](docs/REFERENCE.md) covers the trace
-format, every rule, the reducer, and the generator.
+reported `clean`. The [technical reference](docs/REFERENCE.md) covers every
+rule, the reducer, and the generator; the [trace format](docs/TRACE-FORMAT.md)
+is specified separately.
 
 ## Catch a reclaim bug in running code
 
@@ -130,6 +131,11 @@ nothing about RDMA/NIXL, multi-GPU transfers, or serving engines.
 
 Stateguard diagnoses recorded events. It does not prevent a device from writing to
 memory.
+
+## Releases
+
+Release binaries and a checksummed source archive are published on the [GitHub Releases](https://github.com/kernelworks-com/stateguard/releases) page.
+In 0.x the CMake package matches versions exactly.
 
 ## Tests and feedback
 
