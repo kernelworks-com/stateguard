@@ -607,6 +607,64 @@ void test_retirement_checks() {
   }
 }
 
+void test_follow_on_findings() {
+  const auto flags = [](const std::string& text) {
+    std::vector<bool> result;
+    for (const auto& d : check(parse_trace(text)).diagnostics) result.push_back(d.follow_on);
+    return result;
+  };
+  // The rejected reclaim leaves generation 1 live, so the reallocation, the
+  // use of generation 2, and the completion of the rejected submission are
+  // follow-ons. The reclaim of b without a retire is a primary finding.
+  const auto refused_reclaim = check(parse_trace(
+      "STATEGUARD_TRACE|1\n"
+      "allocate|a|1|64|cpu\n"
+      "submit|op-1|r|w:a:1|\n"
+      "retire|a|1\n"
+      "reclaim|a|1\n"
+      "allocate|a|2|64|cpu\n"
+      "submit|op-2|r|w:a:2|\n"
+      "complete|op-2|succeeded\n"
+      "complete|op-1|succeeded\n"
+      "allocate|b|1|64|cpu\n"
+      "reclaim|b|1\n"
+      "end|complete\n"));
+  require(refused_reclaim.status == CheckStatus::Violation, "refused reclaim status");
+  std::vector<std::pair<DiagnosticCategory, bool>> found;
+  for (const auto& d : refused_reclaim.diagnostics) found.emplace_back(d.category, d.follow_on);
+  require(found == std::vector<std::pair<DiagnosticCategory, bool>>{
+                       {DiagnosticCategory::PrematureReclaim, false},
+                       {DiagnosticCategory::InvalidStateTransition, true},
+                       {DiagnosticCategory::StaleGeneration, true},
+                       {DiagnosticCategory::OrphanedOperation, true},
+                       {DiagnosticCategory::InvalidStateTransition, false}},
+          "refused reclaim follow-ons");
+
+  // A consumption of an allocation that was never published is primary.
+  require(flags("STATEGUARD_TRACE|1\n"
+                "allocate|a|1|64|cpu\n"
+                "bind_state|a|1|s|demo|model-r1|cpu-cache|layer-0|prefix-42|0|16|fp16|"
+                "row-major|absolute\n"
+                "consume|r|s|a|1|demo|model-r1|cpu-cache|layer-0|prefix-42|0|16|fp16|"
+                "row-major|absolute\n"
+                "end|complete\n") == std::vector<bool>{false},
+          "consumption without a rejected publication is primary");
+
+  // Every fixture's first finding stays primary.
+  for (const char* name :
+       {"coverage_gap_unconfirmed.sgtrace", "expired_lease_reclaim.sgtrace",
+        "failed_write_publication.sgtrace", "incompatible_semantics.sgtrace",
+        "missing_completion_evidence.sgtrace", "premature_reclaim.sgtrace",
+        "retry_acknowledges_other_attempt.sgtrace", "stale_epoch_notification.sgtrace",
+        "stale_generation.sgtrace", "write_shared_state.sgtrace"}) {
+    const auto f = flags(fixture(name));
+    require(!f.empty() && !f.front(), std::string(name) + " first finding is a follow-on");
+  }
+  require(flags(fixture("retry_acknowledges_other_attempt.sgtrace")) ==
+              std::vector<bool>{false, true, false, true, false},
+          "rejected completion follow-ons");
+}
+
 void test_round_trip_and_malformed_input() {
   const auto parsed = parse_trace(fixture("shared_prefix.sgtrace"));
   const auto encoded = serialize_trace(parsed);
@@ -690,6 +748,7 @@ int main() {
       {"failure categories", test_failure_categories},
       {"failed writes", test_failed_writes},
       {"retirement checks", test_retirement_checks},
+      {"follow-on findings", test_follow_on_findings},
       {"round trip and malformed input", test_round_trip_and_malformed_input},
   };
   for (const auto& [name, test] : tests) {

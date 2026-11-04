@@ -61,11 +61,23 @@ struct Replay {
   // before this point depends only on fully captured events.
   std::optional<std::size_t> first_gap;
   bool unlocated_loss = false;
+  // Events the checker refused to apply. A later finding whose precondition
+  // is one of these refused states is marked as a follow-on.
+  std::set<AllocationRef> refused_reclaims;
+  std::map<AllocationId, std::set<Generation>> refused_allocations;
+  std::set<AllocationRef> refused_publications;
+  std::set<OperationId> refused_submissions;
+  std::set<OperationId> refused_completions;
 
-  void diagnostic(DiagnosticCategory category, std::size_t index,
-                  std::string message, std::vector<std::string> witness = {}) {
-    report.diagnostics.push_back(
+  Diagnostic& diagnostic(DiagnosticCategory category, std::size_t index,
+                         std::string message, std::vector<std::string> witness = {}) {
+    return report.diagnostics.emplace_back(
         Diagnostic{category, index, std::move(message), std::move(witness)});
+  }
+
+  bool allocation_refused(const AllocationRef& ref) const {
+    const auto found = refused_allocations.find(ref.allocation);
+    return found != refused_allocations.end() && found->second.contains(ref.generation);
   }
 
   static bool valid_identifier(std::string_view value) {
@@ -125,10 +137,12 @@ struct Replay {
                    "allocation " + ref.allocation.value + " generation " +
                        std::to_string(ref.generation) +
                        " is no longer live (last generation was " +
-                       std::to_string(previous->second) + ")");
+                       std::to_string(previous->second) + ")")
+            .follow_on = allocation_refused(ref);
       } else {
         diagnostic(DiagnosticCategory::InvalidStateTransition, index,
-                   "unknown allocation " + ref.allocation.value);
+                   "unknown allocation " + ref.allocation.value)
+            .follow_on = allocation_refused(ref);
       }
       return nullptr;
     }
@@ -139,7 +153,8 @@ struct Replay {
                      std::to_string(ref.generation),
                  {"allocation=" + ref.allocation.value,
                   "current_generation=" + std::to_string(found->second.generation),
-                  "event_generation=" + std::to_string(ref.generation)});
+                  "event_generation=" + std::to_string(ref.generation)})
+          .follow_on = allocation_refused(ref);
       return nullptr;
     }
     return &found->second;
@@ -201,7 +216,13 @@ struct Replay {
     const auto active = allocations.find(event.allocation);
     if (active != allocations.end() && active->second.lifecycle != Lifecycle::Free) {
       diagnostic(DiagnosticCategory::InvalidStateTransition, index,
-                 "allocation " + event.allocation.value + " is already live");
+                 "allocation " + event.allocation.value + " is already live")
+          .follow_on = refused_reclaims.contains(
+              AllocationRef{event.allocation, active->second.generation});
+      const auto previous = last_generation.find(event.allocation);
+      if (previous == last_generation.end() || event.generation > previous->second) {
+        refused_allocations[event.allocation].insert(event.generation);
+      }
       return;
     }
     const auto previous = last_generation.find(event.allocation);
@@ -274,11 +295,13 @@ struct Replay {
       const auto found = operations.find(dependency);
       if (found == operations.end()) {
         diagnostic(DiagnosticCategory::OrphanedOperation, index,
-                   "operation depends on unknown operation " + dependency.value);
+                   "operation depends on unknown operation " + dependency.value)
+            .follow_on = refused_submissions.contains(dependency);
         valid = false;
       } else if (!found->second.completed) {
         diagnostic(DiagnosticCategory::InvalidStateTransition, index,
-                   "operation dependency has not completed: " + dependency.value);
+                   "operation dependency has not completed: " + dependency.value)
+            .follow_on = refused_completions.contains(dependency);
         valid = false;
       }
     }
@@ -310,6 +333,7 @@ struct Replay {
       }
     }
     if (event.route && !route_accepted(*event.route, index)) valid = false;
+    if (!valid) refused_submissions.insert(event.operation);
     if (valid) {
       operations.emplace(event.operation,
                          OperationRecord{event.request, event.leases, false, false,
@@ -359,6 +383,9 @@ struct Replay {
     if (allocation->state != event.state || !allocation->descriptor) {
       diagnostic(DiagnosticCategory::IncompatibleSemanticReuse, index,
                  "published state does not match the allocation's semantic binding");
+      if (allocation->lifecycle != Lifecycle::Published) {
+        refused_publications.insert(event.allocation);
+      }
       return;
     }
     if (allocation->lifecycle == Lifecycle::Published) {
@@ -367,6 +394,7 @@ struct Replay {
     if (allocation->lifecycle != Lifecycle::Initializing) {
       diagnostic(DiagnosticCategory::InvalidStateTransition, index,
                  "only an initializing allocation can be published");
+      refused_publications.insert(event.allocation);
       return;
     }
     bool proof_valid = true;
@@ -379,11 +407,13 @@ struct Replay {
         const auto op = operations.find(*event.completed_operation);
         if (op == operations.end()) {
           diagnostic(DiagnosticCategory::OrphanedOperation, index,
-                     "publication references an unknown completion operation");
+                     "publication references an unknown completion operation")
+              .follow_on = refused_submissions.contains(*event.completed_operation);
           proof_valid = false;
         } else if (!op->second.completed) {
           diagnostic(DiagnosticCategory::InvalidStateTransition, index,
-                     "publication precedes data-access completion");
+                     "publication precedes data-access completion")
+              .follow_on = refused_completions.contains(*event.completed_operation);
           proof_valid = false;
         } else if (!operation_has_writer(op->second, event.allocation)) {
           diagnostic(DiagnosticCategory::InvalidStateTransition, index,
@@ -412,10 +442,14 @@ struct Replay {
                    "publication precedes completion of writer operation " + operation.value,
                    {"allocation=" + event.allocation.allocation.value,
                     "generation=" + std::to_string(event.allocation.generation),
-                    "operation=" + operation.value});
+                    "operation=" + operation.value})
+            .follow_on = refused_completions.contains(operation);
       }
     }
-    if (!proof_valid || pending_writer) return;
+    if (!proof_valid || pending_writer) {
+      refused_publications.insert(event.allocation);
+      return;
+    }
     allocation->lifecycle = Lifecycle::Published;
     states[event.state].publications.insert(event.allocation);
   }
@@ -445,7 +479,8 @@ struct Replay {
     if (allocation == nullptr) return;
     if (allocation->lifecycle != Lifecycle::Published) {
       diagnostic(DiagnosticCategory::InvalidStateTransition, index,
-                 "consumption requires a published allocation");
+                 "consumption requires a published allocation")
+          .follow_on = refused_publications.contains(event.allocation);
       return;
     }
     if (!allocation->state || *allocation->state != event.state) {
@@ -518,7 +553,8 @@ struct Replay {
     const auto found = operations.find(event.operation);
     if (found == operations.end()) {
       diagnostic(DiagnosticCategory::OrphanedOperation, index,
-                 "completion references an unknown operation " + event.operation.value);
+                 "completion references an unknown operation " + event.operation.value)
+          .follow_on = refused_submissions.contains(event.operation);
       return;
     }
     if (event.outcome != AccessOutcome::Succeeded && event.outcome != AccessOutcome::Failed) {
@@ -526,7 +562,10 @@ struct Replay {
                  "completion has an unknown access outcome");
       return;
     }
-    if (event.evidence && !evidence_matches(event, found->second, index)) return;
+    if (event.evidence && !evidence_matches(event, found->second, index)) {
+      if (!found->second.completed) refused_completions.insert(event.operation);
+      return;
+    }
     if (found->second.completed) {
       diagnostic(DiagnosticCategory::DoubleCompletion, index,
                  "operation " + event.operation.value + " completed more than once");
@@ -625,7 +664,8 @@ struct Replay {
     const auto found = operations.find(event.operation);
     if (found == operations.end()) {
       diagnostic(DiagnosticCategory::OrphanedOperation, index,
-                 "expiry references an unknown operation " + event.operation.value);
+                 "expiry references an unknown operation " + event.operation.value)
+          .follow_on = refused_submissions.contains(event.operation);
       return;
     }
     // Expiring a finished operation changes nothing. Otherwise the leases stay:
@@ -658,6 +698,7 @@ struct Replay {
     if (allocation->lifecycle != Lifecycle::Retiring) {
       diagnostic(DiagnosticCategory::InvalidStateTransition, index,
                  "reclaim requires an explicitly retired allocation");
+      refused_reclaims.insert(event.allocation);
       return;
     }
     const bool active_access = lease_outstanding(event.allocation);
@@ -678,6 +719,7 @@ struct Replay {
       diagnostic(DiagnosticCategory::PrematureReclaim, index, std::move(message),
                  {"allocation=" + event.allocation.allocation.value,
                   "generation=" + std::to_string(event.allocation.generation)});
+      refused_reclaims.insert(event.allocation);
       return;
     }
     allocation->lifecycle = Lifecycle::Free;
@@ -718,7 +760,8 @@ struct Replay {
                    "operation " + operation.value +
                        " has no observed access completion" +
                        unproven_end(operation, record),
-                   {"operation=" + operation.value});
+                   {"operation=" + operation.value})
+            .follow_on = refused_completions.contains(operation);
       }
     }
     for (auto& d : report.diagnostics) {

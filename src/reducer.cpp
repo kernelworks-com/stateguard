@@ -17,7 +17,7 @@ namespace {
 bool same_finding(const Diagnostic& a, const Diagnostic& b) {
   // Event indices shift as events are removed; the finding itself does not.
   return a.category == b.category && a.message == b.message && a.witness == b.witness &&
-         a.confirmed == b.confirmed;
+         a.confirmed == b.confirmed && a.follow_on == b.follow_on;
 }
 
 bool confirmed_violation(const Diagnostic& diagnostic) {
@@ -299,14 +299,16 @@ ReductionOracle::ReductionOracle(const Trace& original,
       throw ReductionError(
           "trace has definite violations; incomplete evidence cannot be reduced on its own");
     }
-    // Prefer a confirmed finding; an unconfirmed one is reduced only when it
-    // is the sole finding of that category.
+    // Prefer a confirmed finding, then a primary one; an unconfirmed or
+    // follow-on finding is reduced only when no better one of that category
+    // exists.
+    const auto rank = [](const Diagnostic& d) {
+      return (d.confirmed ? 0 : 2) + (d.follow_on ? 1 : 0);
+    };
     for (const auto& diagnostic : report.diagnostics) {
       if (diagnostic.category != *category) continue;
-      if (target == nullptr || (!target->confirmed && diagnostic.confirmed)) {
-        target = &diagnostic;
-      }
-      if (target->confirmed) break;
+      if (target == nullptr || rank(diagnostic) < rank(*target)) target = &diagnostic;
+      if (rank(*target) == 0) break;
     }
     if (target == nullptr) {
       throw ReductionError("trace reports no " + to_string(*category) + " diagnostic");

@@ -40,6 +40,10 @@ struct Diagnostic {
   // explain an unconfirmed finding, so it makes the trace inconclusive rather
   // than a violation. Incomplete-evidence diagnostics are always confirmed.
   bool confirmed = true;
+  // True when the finding exists only because the checker refused an earlier
+  // event: its precondition is a state that event would have changed (see
+  // "Follow-on findings" in docs/REFERENCE.md). It never changes the status.
+  bool follow_on = false;
 };
 
 // A trace is a Violation only when it has a confirmed definite finding.
