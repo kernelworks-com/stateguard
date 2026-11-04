@@ -129,6 +129,11 @@ nothing about RDMA/NIXL, multi-GPU transfers, or serving engines.
 Stateguard diagnoses recorded events. It does not prevent a device from writing to
 memory.
 
+## Releases
+
+Release binaries and a checksummed source archive are published on the [GitHub Releases](https://github.com/kernelworks-com/stateguard/releases) page.
+In 0.x the CMake package matches versions exactly.
+
 ## Tests and feedback
 
 ```sh
