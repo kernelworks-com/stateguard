@@ -85,6 +85,9 @@ if(STATEGUARD_BUILD_TESTS)
   endfunction()
   stateguard_add_test_suite(stateguard-tests tests/test_main.cpp)
   stateguard_add_test_suite(stateguard-generate-reduce-tests tests/test_generate_reduce.cpp)
+  find_package(Threads REQUIRED)
+  stateguard_add_test_suite(stateguard-capture-tests tests/test_capture.cpp
+    stateguard::stateguard Threads::Threads)
   if(TARGET stateguard-async-copy)
     stateguard_add_test_suite(stateguard-async-copy-tests tests/test_async_copy.cpp
       stateguard-async-copy)
