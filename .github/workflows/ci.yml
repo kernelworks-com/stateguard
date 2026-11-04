@@ -34,7 +34,7 @@ jobs:
           - os: windows-2022
             compiler: cl
             mode: Release
-            flags: /W4 /WX /permissive- /EHsc
+            flags: -W4 -WX -permissive- -EHsc
             experimental: true
     continue-on-error: ${{ matrix.experimental == true }}
     defaults:
