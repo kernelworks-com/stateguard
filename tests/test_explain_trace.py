@@ -81,7 +81,7 @@ class ExplainTraceTest(unittest.TestCase):
         path, auth, body = StubHandler.requests[0]
         self.assertEqual(path, "/v1/chat/completions")
         self.assertEqual(auth, "Bearer test-key")
-        self.assertEqual(body["model"], "muse-spark-1.3")
+        self.assertEqual(body["model"], "muse-spark-1.3-contributor")
         self.assertEqual([m["role"] for m in body["messages"]], ["system", "user"])
         self.assertIn("reclaim|buffer-1|1", body["messages"][1]["content"])
 

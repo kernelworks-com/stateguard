@@ -601,13 +601,13 @@ terms. The reply is printed after the line
   stderr and exits 4, after the checker result. A missing tool, unreadable
   trace, or refused size exits 3.
 - **Any OpenAI-compatible endpoint works.** Defaults are the Meta Model API:
-  `--base-url https://api.meta.ai/v1`, `--model muse-spark-1.3`,
+  `--base-url https://api.meta.ai/v1`, `--model muse-spark-1.3-contributor`,
   `--api-key-env META_API_KEY`. Point `--base-url`, `--model`, and
   `--api-key-env` at another provider or a local server to use it instead.
-  The provider also lists `muse-spark-1.3-contributor`, the same model at a
-  much lower price; its terms state that inputs and outputs are used to train
-  the provider's models and that it is rate-limited, so choose it only for
-  traces you are willing to share that way.
+  The default model is the provider's low-price variant; its terms state
+  that inputs and outputs are used to train the provider's models and that
+  it is rate-limited. Pass `--model muse-spark-1.3` (same model, standard
+  price) for traces you do not want used that way.
   `--checker` and `--timeline` override where the tools are found (default:
   `--build-dir`, then `PATH`); `--timeout` sets the request timeout in seconds.
 

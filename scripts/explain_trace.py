@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
-DEFAULT_MODEL = "muse-spark-1.3"
+DEFAULT_MODEL = "muse-spark-1.3-contributor"
 DEFAULT_KEY_ENV = "META_API_KEY"
 DEFAULT_MAX_TRACE_BYTES = 64 * 1024
 EXIT_EXPLAIN_ERROR = 4
