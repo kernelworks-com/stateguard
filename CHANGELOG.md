@@ -7,6 +7,12 @@ package matches versions exactly.
 
 ## [Unreleased]
 
+### Added
+
+- Findings that exist only because the checker rejected an earlier event are
+  marked `[follow-on]` (`Diagnostic::follow_on`, `"follow_on"` in JSON).
+  `stateguard-check --primary-only` hides them. The status is unchanged.
+
 ## [0.1.0]
 
 First experimental alpha. It runs on the CPU; an optional CUDA harness has been

@@ -29,6 +29,8 @@ target_compile_options(stateguard PRIVATE
 foreach(tool check generate reduce timeline)
   add_executable(stateguard-${tool} tools/stateguard_${tool}.cpp)
   target_link_libraries(stateguard-${tool} PRIVATE stateguard::stateguard)
+  target_compile_definitions(stateguard-${tool} PRIVATE
+    STATEGUARD_VERSION="${PROJECT_VERSION}")
 endforeach()
 
 # Instrumented allocator and async-copy harness used by the demo and tests.
@@ -131,6 +133,66 @@ if(STATEGUARD_BUILD_TESTS)
               $<TARGET_FILE:stateguard-check> ${CMAKE_CURRENT_SOURCE_DIR}/docs/TRACE-FORMAT.md)
   endif()
 
+  # Machine-readable output, standard input, --help and --version.
+  set(fixtures ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME cli-check-json-violation
+      COMMAND sh -c "\"$1\" --json \"$2\"; test $? -eq 1 || exit 9" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace)
+    add_test(NAME cli-check-json-parse
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='violation' and d['exit_code']==1, d; assert d['diagnostics'][0]['category']=='premature_reclaim', d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-clean
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='clean' and d['exit_code']==0 and d['diagnostics']==[], d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/safe_deferred_reclaim.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-unconfirmed
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='inconclusive', d; assert d['diagnostics'][0]['category']=='incomplete_evidence' and not d['diagnostics'][1]['confirmed'], d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/coverage_gap_unconfirmed.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-follow-on
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); f=[x['follow_on'] for x in d['diagnostics']]; assert f==[False,True,False,True,False], d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/retry_acknowledges_other_attempt.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-check-json-primary-only
+      COMMAND sh -c "\"$1\" --json --primary-only \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='violation' and d['exit_code']==1, d; assert len(d['diagnostics'])==3 and not any(x['follow_on'] for x in d['diagnostics']), d\"" sh
+              $<TARGET_FILE:stateguard-check> ${fixtures}/retry_acknowledges_other_attempt.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-timeline-json
+      COMMAND sh -c "\"$1\" --json - < \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['status']=='complete', d; assert d['first_ns'] is not None and d['requests'] and d['allocations'], d; assert d['peak_cancelled_only_bytes'] >= 0, d\"" sh
+              $<TARGET_FILE:stateguard-timeline> ${fixtures}/cancellation_timeline.sgtrace
+              ${Python3_EXECUTABLE})
+    add_test(NAME cli-timeline-json-untimed
+      COMMAND sh -c "\"$1\" --json \"$2\" | \"$3\" -c \"import json,sys; d=json.load(sys.stdin); assert d['first_ns'] is None and d['last_ns'] is None, d\"" sh
+              $<TARGET_FILE:stateguard-timeline> ${fixtures}/premature_reclaim.sgtrace
+              ${Python3_EXECUTABLE})
+    # LLM-assisted explanation script, against a local stub server.
+    add_test(NAME explain-trace-script
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_explain_trace.py)
+    set_tests_properties(explain-trace-script PROPERTIES
+      ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>")
+  endif()
+  add_test(NAME cli-check-stdin
+    COMMAND sh -c "cat \"$2\" | \"$1\" -" sh
+            $<TARGET_FILE:stateguard-check> ${fixtures}/premature_reclaim.sgtrace)
+  set_tests_properties(cli-check-stdin PROPERTIES
+    PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ premature_reclaim")
+  add_test(NAME cli-reduce-stdin
+    COMMAND sh -c "cat \"$2\" | \"$1\" -" sh
+            $<TARGET_FILE:stateguard-reduce> ${fixtures}/premature_reclaim.sgtrace)
+  set_tests_properties(cli-reduce-stdin PROPERTIES PASS_REGULAR_EXPRESSION "premature_reclaim")
+  add_test(NAME cli-check-quiet
+    COMMAND stateguard-check --quiet ${fixtures}/premature_reclaim.sgtrace)
+  set_tests_properties(cli-check-quiet PROPERTIES PASS_REGULAR_EXPRESSION "^violation\r?\n$")
+  foreach(tool check generate reduce timeline)
+    add_test(NAME cli-${tool}-version COMMAND stateguard-${tool} --version)
+    set_tests_properties(cli-${tool}-version PROPERTIES
+      PASS_REGULAR_EXPRESSION "^stateguard-${tool} ${PROJECT_VERSION}\r?\n$")
+    add_test(NAME cli-${tool}-help COMMAND stateguard-${tool} --help)
+    set_tests_properties(cli-${tool}-help PROPERTIES PASS_REGULAR_EXPRESSION "exit codes:")
+  endforeach()
+
   # Harness workflow: capture traces from the instrumented async-copy demo,
   # then check and reduce them with the offline tools.
   if(STATEGUARD_BUILD_EXAMPLES)
@@ -157,6 +219,17 @@ if(STATEGUARD_BUILD_TESTS)
     set_tests_properties(cli-check-harness-failed-publish PROPERTIES
       FIXTURES_REQUIRED harness_traces
       PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ failed_write_publication")
+    add_test(NAME cli-check-harness-failed-publish-follow-on
+      COMMAND stateguard-check ${cli_dir}/failed-publish.sgtrace)
+    set_tests_properties(cli-check-harness-failed-publish-follow-on PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "\r?\n[0-9]+ invalid_state_transition \\[follow-on\\]: consumption requires")
+    add_test(NAME cli-check-harness-primary-only
+      COMMAND stateguard-check --primary-only ${cli_dir}/immediate.sgtrace)
+    set_tests_properties(cli-check-harness-primary-only PROPERTIES
+      FIXTURES_REQUIRED harness_traces
+      PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ premature_reclaim"
+      FAIL_REGULAR_EXPRESSION "follow-on|stale_generation|orphaned_operation")
     # Cancellation timeline on the steady clock with a 20 ms injected delay.
     add_test(NAME cancellation-demo
       COMMAND stateguard-cancellation-demo --delay-ms 20 --trace-dir ${cli_dir})

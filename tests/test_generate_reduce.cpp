@@ -70,7 +70,7 @@ std::vector<Fault> planted_faults() {
 
 bool same_finding(const Diagnostic& a, const Diagnostic& b) {
   return a.category == b.category && a.message == b.message && a.witness == b.witness &&
-         a.confirmed == b.confirmed;
+         a.confirmed == b.confirmed && a.follow_on == b.follow_on;
 }
 
 void test_generation_is_deterministic() {
@@ -472,6 +472,45 @@ void test_oracle_rejects_manufactured_failures() {
           "oracle accepted a trace whose first completion was removed");
 }
 
+void test_reduction_keeps_findings_follow_on() {
+  // The consumption fails only because the publication before it was refused.
+  // Deleting that publication would leave the same message as a primary
+  // finding; the oracle must keep the refused publication in the witness.
+  auto text = fixture("failed_write_publication.sgtrace");
+  const std::string consume =
+      "consume|request-1|state-1|cache-1|1|demo|model-r1|cpu-cache|layer-0|prefix-42|0|16|"
+      "fp16|row-major|absolute\n";
+  text.insert(text.find("retire|"), consume);
+  const auto trace = parse_trace(text);
+  const auto before = check(trace);
+  require(before.diagnostics.size() == 2 && before.diagnostics[1].follow_on &&
+              !before.diagnostics[0].follow_on,
+          "test precondition: the consumption should be a follow-on finding");
+
+  const ReductionOracle oracle(trace, DiagnosticCategory::InvalidStateTransition);
+  require(oracle.target().follow_on, "the oracle should target the follow-on finding");
+  auto without_publish = trace;
+  without_publish.events.erase(without_publish.events.begin() + 5);
+  const auto promoted = check(without_publish);
+  require(promoted.status == CheckStatus::Violation && promoted.diagnostics.size() == 1 &&
+              !promoted.diagnostics[0].follow_on &&
+              promoted.diagnostics[0].message == oracle.target().message,
+          "test precondition: removing the publication should promote the finding");
+  require(!oracle.reproduced_by(without_publish),
+          "oracle accepted a trace that promotes a follow-on finding to primary");
+
+  ReductionOptions options;
+  options.category = DiagnosticCategory::InvalidStateTransition;
+  const auto result = reduce_trace(trace, options);
+  require_valid_reduction(trace, result, "follow-on consumption", options.category);
+  require(result.target.follow_on, "the reduction target should stay a follow-on");
+  require(std::any_of(result.trace.events.begin(), result.trace.events.end(),
+                      [](const Event& event) {
+                        return std::holds_alternative<PublishEvent>(event);
+                      }),
+          "reduction removed the refused publication that explains the finding");
+}
+
 void test_inconclusive_reduction() {
   GeneratorConfig config;
   config.fault = Fault::DroppedCompletion;
@@ -566,6 +605,7 @@ int main() {
       {"reduction of fixtures", test_reduction_of_fixtures},
       {"oracle rejects manufactured failures", test_oracle_rejects_manufactured_failures},
       {"inconclusive reduction", test_inconclusive_reduction},
+      {"reduction keeps findings follow-on", test_reduction_keeps_findings_follow_on},
       {"reduction keeps findings unconfirmed", test_reduction_keeps_findings_unconfirmed},
       {"reduction errors and budget", test_reduction_errors_and_budget},
   };

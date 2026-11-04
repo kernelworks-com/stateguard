@@ -65,6 +65,41 @@ Publication waits for every writer lease on that allocation generation to
 complete. When a completion proof is supplied, it must identify a completed
 operation that held the matching initialization write lease.
 
+## Follow-on findings
+
+When the checker rejects an event, it does not apply it, and it keeps checking
+the rest of the trace. A later event can then fail only because the rejected
+state change is missing. Such a finding is listed with `[follow-on]`; in the API
+it has `Diagnostic::follow_on == true`. The flag never changes the status or the
+exit code, and the first finding of a trace is never a follow-on, since its
+cause is reported before it. `stateguard-check --primary-only` hides follow-on
+findings in text and JSON output.
+
+A finding is a follow-on only under one of these rules:
+
+| Rejected earlier | Later finding marked `[follow-on]` |
+|---|---|
+| `reclaim` of a generation (a `premature_reclaim`, or a reclaim without `retire`), so the generation stays live | `allocate` of that allocation fails because it is already live |
+| `allocate` of a new, higher generation because the allocation is still live | a reference to that generation fails as `stale_generation` or as an unknown allocation |
+| `publish` of a generation that was not yet published, for any reason | `consume` of that generation fails because it is not published |
+| `submit` of a new operation identity, for any reason | `orphaned_operation` for that identity: its completion, expiry, use as a dependency, or use as a publication proof |
+| `complete` whose transfer evidence does not match the operation (`misattributed_completion` or malformed evidence), so the operation stays outstanding | a dependency on that operation that has not completed, a publication that precedes its completion (as the cited proof or as an outstanding writer), and the end-of-trace `incomplete_evidence` that it has no observed completion |
+
+Other categories are never marked, because the rule would be a guess:
+`premature_reclaim` (an operation whose completion was rejected may still be
+accessing memory, so a later reclaim can be a real hazard),
+`write_through_shared_immutable_state`, `incompatible_semantic_reuse`,
+`double_completion`, `failed_write_publication`, `misattributed_completion`,
+capture gaps, and findings after rejected events not in the table (for
+example a rejected `bind_state`). A follow-on finding is still reported: the
+same event might also fail for another reason that the missing state change
+hides.
+
+In the async-copy demo's immediate-reclaim trace, 14 of 16 findings are
+follow-ons; the two primary findings are the two `premature_reclaim`s. In its
+failed-publication trace, 2 of 3 findings are follow-ons: both consumptions of
+the unpublished state.
+
 ## Failed completions
 
 A completion can record that the operation's access failed:
@@ -333,11 +368,12 @@ tests require the two to agree on every schedule:
 
 For each reclaim violation, the first confirmed finding is `premature_reclaim` for the
 first unsafe reclaim, with the matching reason (active lease or live consumer).
-After that finding, the checker reports follow-on errors: the slot is reused while
-the checker still treats the old generation as live. In the failed-publication
-run, the rejected publication is not recorded, so each later consumption of that
-state is also reported as consuming an unpublished allocation. Run
-`stateguard-reduce` to get a witness for the first failure.
+After that finding, the checker reports [follow-on findings](#follow-on-findings):
+the slot is reused while the checker still treats the old generation as live. In
+the failed-publication run, the rejected publication is not recorded, so each
+later consumption of that state is reported as a follow-on that consumes an
+unpublished allocation. Run `stateguard-reduce` to get a witness for the first
+failure.
 
 ### Routed transfers
 
@@ -529,6 +565,90 @@ its work; only completions end accesses. GPU time of mixed batches is not split
 between requests. The LMCache adapter and the CUDA demo do not record timestamps
 yet.
 
+## Machine-readable output
+
+All four tools accept `--help` (usage, options, and exit codes on stdout, exit
+0) and `--version` (`stateguard-<tool> 0.1.0`, exit 0). `stateguard-check`,
+`stateguard-reduce`, and `stateguard-timeline` read the trace from standard
+input when the file argument is `-`. Without the flags below, the text output
+and the exit codes are unchanged.
+
+`stateguard-check --quiet` prints the status line only. `stateguard-check
+--primary-only` omits [follow-on findings](#follow-on-findings) from the text or
+JSON list; the status and exit code are unchanged. `stateguard-check
+--json` and `stateguard-timeline --json` print one JSON object on one line of
+stdout and exit with the same code as the text mode. Usage errors and
+unreadable or malformed traces print a message on stderr, no JSON, and exit 3.
+Absent times are `null`. An allocation reference is
+`{"allocation": "<id>", "generation": <n>}`; a request is its id string.
+
+`stateguard-check --json`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `status` | string | `clean`, `violation`, or `inconclusive` |
+| `exit_code` | number | 0, 1, or 2, as the process exits |
+| `capture_complete` | bool | the end marker says the capture was complete (`end\|complete`) |
+| `diagnostics` | list | findings in trace order, each with `index` (event), `category`, `confirmed`, `follow_on`, `message`, and `witness` (list of strings) |
+
+`stateguard-timeline --json` mirrors `TimelineReport` in
+`include/stateguard/timeline.hpp`, with the same member names:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `status` | string | `complete` or `incomplete` |
+| `clock` | string | the trace's clock, empty when untimed |
+| `first_ns`, `last_ns` | number or null | first and last timestamp |
+| `requests` | list | `request`, `signal_ns`, `ack_ns`, `last_access_ns`, `cancelled_only` (refs), `not_attributed` (refs), `eligible_ns`, `reuse_ns` |
+| `allocations` | list | `allocation` (ref), `bytes`, `requests`, `last_access_ns`, `eligible_ns`, `reclaim_ns`, `reuse_ns`, `reclaimed_before_eligible`, `cancelled_only`, `cancelled_only_ns`, `cancelled_only_byte_seconds`, `retained_at_end` |
+| `peak_cancelled_only_bytes` | number | deduplicated peak |
+| `cancelled_only_byte_seconds` | number | deduplicated total |
+| `incomplete` | list of strings | reasons the timeline is incomplete |
+
+Times are absolute nanoseconds on the trace's clock, not relative to
+`first_ns` as in the text output. Keys are stable within 0.x: a key is renamed
+or removed only with a changelog entry. New keys may be added.
+
+## LLM-assisted explanation
+
+`scripts/explain_trace.py` (Python 3.9+, standard library only) explains the
+first finding of a trace with an OpenAI-compatible chat endpoint:
+
+```sh
+export META_API_KEY=...
+python3 scripts/explain_trace.py --build-dir build tests/fixtures/premature_reclaim.sgtrace
+```
+
+It runs `stateguard-check --json` and, when the trace has `time|` events,
+`stateguard-timeline --json`, prints the checker's status and first finding,
+then sends one `POST <base-url>/chat/completions` request with
+`Authorization: Bearer <key>`. The request holds a fixed system prompt that
+states the event model's rules and forbids inventing findings, the full trace
+text, and the JSON reports, and asks for a plain-language explanation of the
+first finding, the ordering edge that caused it, and a fix in the producer's
+terms. The reply is printed after the line
+`LLM-assisted explanation (not evidence):`.
+
+- **Trace contents go to a third-party service.** Never send production
+  captures. Traces larger than `--max-trace-bytes` (default 65536) are refused;
+  shrink them with `stateguard-reduce` first. `--dry-run` prints the exact
+  request, key redacted, without any network access.
+- **The model's text is not a checker result.** Only the checker's status,
+  findings, and exit code are evidence. The script exits with the checker's
+  code; if the key is missing or the request fails, it prints the error on
+  stderr and exits 4, after the checker result. A missing tool, unreadable
+  trace, or refused size exits 3.
+- **Any OpenAI-compatible endpoint works.** Defaults are the Meta Model API:
+  `--base-url https://api.meta.ai/v1`, `--model muse-spark-1.3-contributor`,
+  `--api-key-env META_API_KEY`. Point `--base-url`, `--model`, and
+  `--api-key-env` at another provider or a local server to use it instead.
+  The default model is the provider's low-price variant; its terms state
+  that inputs and outputs are used to train the provider's models and that
+  it is rate-limited. Pass `--model muse-spark-1.3` (same model, standard
+  price) for traces you do not want used that way.
+  `--checker` and `--timeline` override where the tools are found (default:
+  `--build-dir`, then `PATH`); `--timeout` sets the request timeout in seconds.
+
 ## Scope and limitations
 
 Stateguard is a diagnostic tool, not a proof that every inference result
@@ -564,7 +684,9 @@ Known blind spots:
   (including under ThreadSanitizer), not with a real multi-threaded engine, and
   its cross-thread order is the lock order unless the adapter records under the
   lock that publishes each effect.
-- A rejected lifecycle event can cause follow-on diagnostics.
+- A rejected event can cause follow-on diagnostics. Only the cases in
+  [Follow-on findings](#follow-on-findings) are marked; others are listed as
+  primary findings.
 - The CUDA engine throws on CUDA errors instead of recording a failed
   completion. The async-copy demo does not run the routed scenarios (the tests
   do), and the generator does not produce routed histories.
@@ -604,7 +726,9 @@ The failure result deliberately reflects the visibility contract: the vulnerable
 key stays in progress and is hidden by `contains()`, so the adapter does not invent
 a failed publication. Its pending metadata operation reports missing cleanup.
 The source case's first finding is `premature_reclaim`; subsequent findings can
-cascade after rejected lifecycle events. These reproduce the existing upstream
+cascade after rejected lifecycle events (see
+[Follow-on findings](#follow-on-findings); the source case has not been rerun
+since that marking was added). These reproduce the existing upstream
 regression, not a newly discovered upstream issue.
 
 Wall-clock microharness measurements, milliseconds, median [min, max], 20 measured

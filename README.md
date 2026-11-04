@@ -74,6 +74,10 @@ Optional: [LMCache static-put adapter](docs/LMCACHE.md), with CPU mocked regress
 - `stateguard-generate --seed N [--fault NAME]` writes a deterministic synthetic
   history, optionally with one planted fault, for testing your own tooling.
 
+Every tool accepts `--help`, `--version`, and `-` for standard input; `stateguard-check --json` and `stateguard-timeline --json` print one JSON object ([keys](docs/REFERENCE.md#machine-readable-output)).
+
+`scripts/explain_trace.py` asks an OpenAI-compatible chat endpoint to explain the first finding; trace contents leave your machine and the reply is not evidence ([details](docs/REFERENCE.md#llm-assisted-explanation)).
+
 To instrument your own code, start with the
 [instrumented example](examples/instrumented_demo.cpp) and the
 [public headers](include/stateguard/stateguard.hpp). `stateguard::TraceRecorder`
