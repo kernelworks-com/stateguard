@@ -119,14 +119,18 @@ to `build/<name>.sgtrace`.
 Configure with `-DSTATEGUARD_ENABLE_CUDA=ON` to build `stateguard-cuda-copy-demo`.
 It copies 64 MiB between device buffers with `cudaMemcpyAsync`, records completion
 only after a CUDA event confirms it, and in the buggy run refills the reclaimed
-source on a second stream. On a Tesla T4 (driver 580.82.07, CUDA 13.0), 20 runs
-each:
+source on a second stream. Checked at tag v0.1.0 on a Tesla T4 (driver 580.82.07,
+CUDA 13.0), 500 runs each:
 
 | Configuration | Checker | Bytes received |
 |---|---|---|
-| Safe deferred reclamation | `clean` 20/20 | intact 20/20 |
-| Immediate reclamation | `premature_reclaim` 20/20 | intact 20/20 |
-| Immediate reclamation, copy start delayed 20 ms | `premature_reclaim` 20/20 | corrupted 20/20 |
+| Safe deferred reclamation | `clean` 500/500 | intact 500/500 |
+| Safe deferred reclamation, copy start delayed 20 ms | `clean` 500/500 | intact 500/500 |
+| Immediate reclamation | `premature_reclaim` 500/500 | intact 500/500 |
+| Immediate reclamation, copy start delayed 20 ms | `premature_reclaim` 500/500 | corrupted 500/500 |
+
+The same machine checked 6,000 generated histories with planted faults, every
+verdict as planted ([details](docs/REFERENCE.md#cuda-copy-harness)).
 
 Whether the early reclaim corrupts data depends on timing; the checker reports
 the unsafe ordering either way. [`scripts/colab_gpu_check.sh`](scripts/colab_gpu_check.sh)
