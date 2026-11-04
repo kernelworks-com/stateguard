@@ -269,6 +269,18 @@ planted event:
 Generated histories are synthetic. They test the checker's model; they do not
 show how any engine behaves or how often these failures occur in practice.
 
+`scripts/synthetic_sweep.py` (Python 3, standard library) runs the generator
+at scale: for every fault and the fault-free history it generates `--seeds`
+histories over three shapes, checks each with `stateguard-check --json`, and
+compares the verdict and first primary finding with the table above; a
+sample of the failing traces is reduced and checked again. It prints one
+line per fault and exits non-zero on any mismatch; `--json FILE` writes the
+full record. CTest runs it with 3 seeds per fault. On this macOS machine,
+100 seeds per fault (1,200 histories, 441,552 events) matched in every case
+and 22 of 22 sampled reductions kept their finding, in 16 seconds.
+`scripts/colab_gpu_check.sh` runs it on the GPU machine after the CUDA demo
+(`STATEGUARD_SWEEP_SEEDS`, default 100; `STATEGUARD_DEMO_REPEAT`, default 20).
+
 ## Capturing events from native code
 
 `stateguard::TraceRecorder` (in `capture.hpp`) collects events from instrumented
