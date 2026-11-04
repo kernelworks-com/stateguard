@@ -120,6 +120,14 @@ if(STATEGUARD_BUILD_TESTS)
     COMMAND stateguard-reduce ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/safe_deferred_reclaim.sgtrace)
   set_tests_properties(cli-reduce-clean-trace PROPERTIES WILL_FAIL TRUE)
 
+  # Every example trace in the format specification must parse.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME docs-trace-format-examples
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_trace_format_doc.py
+              $<TARGET_FILE:stateguard-check> ${CMAKE_CURRENT_SOURCE_DIR}/docs/TRACE-FORMAT.md)
+  endif()
+
   # Harness workflow: capture traces from the instrumented async-copy demo,
   # then check and reduce them with the offline tools.
   if(STATEGUARD_BUILD_EXAMPLES)

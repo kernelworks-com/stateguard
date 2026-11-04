@@ -8,10 +8,8 @@ Instrument allocation, transfer, retirement, and consumption boundaries; capture
 an event trace; run the checker; inspect a diagnostic tied to the relevant state
 and operation identifiers. Capture coverage and dropped events must be visible.
 
-The current fixture format is a readable, line-oriented schema with a major
-version header. It is suitable for synthetic fixtures and small captures; it is
-not an ABI promise. Fields are separated by `|`, and identifiers and text fields
-must not contain the reserved separators used by the format.
+Traces use the line-oriented `.sgtrace` format, specified field by field in
+[TRACE-FORMAT.md](TRACE-FORMAT.md).
 
 Build and run the checker with CMake and CTest:
 
@@ -75,11 +73,9 @@ A completion can record that the operation's access failed:
 complete|load-1|failed
 ```
 
-The third field is optional. `succeeded` is also accepted, and a successful
-completion is still written in the two-field form `complete|load-1`, so traces
-without failures are unchanged. A reader that predates the field rejects the
-line as malformed instead of reading the failure as a success. In the API, the
-field is `CompleteAccessEvent::outcome` (`AccessOutcome::Succeeded` or
+The outcome field and its compatibility rules are in the
+[format specification](TRACE-FORMAT.md#complete-forms). In the API, the field is
+`CompleteAccessEvent::outcome` (`AccessOutcome::Succeeded` or
 `AccessOutcome::Failed`).
 
 A failed completion still ends the access: the operation no longer touches its
@@ -114,16 +110,13 @@ expire|load-1|timeout
 complete|load-1|succeeded|peer-a:1:7
 ```
 
-- `connect|<endpoint>|<epoch>` starts a new connection epoch of a transport
-  endpoint and ends the previous one. Epochs must increase.
-- An optional sixth `submit` field, `<endpoint>:<epoch>:<tag>`, is the operation's
-  transfer route: the endpoint, its current epoch, and the backend's tag for the
-  transfer. Two operations cannot share a route. A tag can repeat in a new epoch.
-- An optional fourth `complete` field is the route that the backend's completion
-  named. The outcome field is then required, for example
-  `complete|load-1|succeeded|peer-a:1:7`.
-- `expire|<operation>|<reason>` records that the host stopped waiting for an
-  operation. The reason is free text without separators.
+`connect` starts a new connection epoch of an endpoint, the optional route
+field of `submit` names the operation's transfer (endpoint, epoch, and backend
+tag), the optional evidence field of `complete` names the route the backend's
+completion reported, and `expire` records that the host stopped waiting. The
+[format specification](TRACE-FORMAT.md#events) gives their fields. Epochs must
+increase, two operations cannot share a route, and a tag can repeat in a new
+epoch.
 
 The rules:
 
@@ -437,7 +430,8 @@ finish|request-2
 
 `time` says the following events happened at that reading (nanoseconds) of the
 named monotonic clock, `cancel_signal` that the process received a cancellation
-signal, and `finish` that a request ended normally.
+signal, and `finish` that a request ended normally. Their fields are in the
+[format specification](TRACE-FORMAT.md#events).
 
 The existing `cancel` event is the scheduler's acknowledgment. The checker
 treats `finish` like `cancel` (the request's consumer role ends), ignores
