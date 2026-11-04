@@ -107,7 +107,7 @@ if(STATEGUARD_BUILD_TESTS)
     COMMAND stateguard-check ${cli_dir}/generated.sgtrace)
   set_tests_properties(cli-check-generated PROPERTIES
     FIXTURES_REQUIRED generated_trace
-    PASS_REGULAR_EXPRESSION "^violation\n.*premature_reclaim")
+    PASS_REGULAR_EXPRESSION "^violation\r?\n.*premature_reclaim")
   add_test(NAME cli-reduce
     COMMAND stateguard-reduce --output ${cli_dir}/reduced.sgtrace
             ${cli_dir}/generated.sgtrace)
@@ -118,7 +118,7 @@ if(STATEGUARD_BUILD_TESTS)
     COMMAND stateguard-check ${cli_dir}/reduced.sgtrace)
   set_tests_properties(cli-check-reduced PROPERTIES
     FIXTURES_REQUIRED reduced_trace
-    PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+    PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ premature_reclaim")
   add_test(NAME cli-reduce-clean-trace
     COMMAND stateguard-reduce ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/safe_deferred_reclaim.sgtrace)
   set_tests_properties(cli-reduce-clean-trace PROPERTIES WILL_FAIL TRUE)
@@ -141,22 +141,22 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND stateguard-check ${cli_dir}/safe.sgtrace)
     set_tests_properties(cli-check-harness-safe PROPERTIES
       FIXTURES_REQUIRED harness_traces
-      PASS_REGULAR_EXPRESSION "^clean\n$")
+      PASS_REGULAR_EXPRESSION "^clean\r?\n$")
     add_test(NAME cli-check-harness-immediate
       COMMAND stateguard-check ${cli_dir}/immediate.sgtrace)
     set_tests_properties(cli-check-harness-immediate PROPERTIES
       FIXTURES_REQUIRED harness_traces
-      PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+      PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ premature_reclaim")
     add_test(NAME cli-check-harness-failed-retry
       COMMAND stateguard-check ${cli_dir}/failed-retry.sgtrace)
     set_tests_properties(cli-check-harness-failed-retry PROPERTIES
       FIXTURES_REQUIRED harness_traces
-      PASS_REGULAR_EXPRESSION "^clean\n$")
+      PASS_REGULAR_EXPRESSION "^clean\r?\n$")
     add_test(NAME cli-check-harness-failed-publish
       COMMAND stateguard-check ${cli_dir}/failed-publish.sgtrace)
     set_tests_properties(cli-check-harness-failed-publish PROPERTIES
       FIXTURES_REQUIRED harness_traces
-      PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ failed_write_publication")
+      PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ failed_write_publication")
     # Cancellation timeline on the steady clock with a 20 ms injected delay.
     add_test(NAME cancellation-demo
       COMMAND stateguard-cancellation-demo --delay-ms 20 --trace-dir ${cli_dir})
@@ -166,13 +166,13 @@ if(STATEGUARD_BUILD_TESTS)
         COMMAND stateguard-check ${cli_dir}/cancel-${name}.sgtrace)
       set_tests_properties(cli-check-cancel-${name} PROPERTIES
         FIXTURES_REQUIRED cancel_traces
-        PASS_REGULAR_EXPRESSION "^clean\n$")
+        PASS_REGULAR_EXPRESSION "^clean\r?\n$")
     endforeach()
     add_test(NAME cli-timeline-cancel-delayed
       COMMAND stateguard-timeline ${cli_dir}/cancel-delayed.sgtrace)
     set_tests_properties(cli-timeline-cancel-delayed PROPERTIES
       FIXTURES_REQUIRED cancel_traces
-      PASS_REGULAR_EXPRESSION "^complete\nclock steady\n.*cancellation_to_reuse [0-9]+ ns")
+      PASS_REGULAR_EXPRESSION "^complete\r?\nclock steady\r?\n.*cancellation_to_reuse [0-9]+ ns")
     add_test(NAME cli-timeline-cancel-shared
       COMMAND stateguard-timeline ${cli_dir}/cancel-shared.sgtrace)
     set_tests_properties(cli-timeline-cancel-shared PROPERTIES
@@ -182,12 +182,12 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND stateguard-timeline ${cli_dir}/cancel-missing.sgtrace)
     set_tests_properties(cli-timeline-cancel-missing PROPERTIES
       FIXTURES_REQUIRED cancel_traces
-      PASS_REGULAR_EXPRESSION "^incomplete\n.*incomplete: operation copy-1 of request request-1 has no observed access completion")
+      PASS_REGULAR_EXPRESSION "^incomplete\r?\n.*incomplete: operation copy-1 of request request-1 has no observed access completion")
     add_test(NAME cli-check-cancel-missing
       COMMAND stateguard-check ${cli_dir}/cancel-missing.sgtrace)
     set_tests_properties(cli-check-cancel-missing PROPERTIES
       FIXTURES_REQUIRED cancel_traces
-      PASS_REGULAR_EXPRESSION "^inconclusive\n")
+      PASS_REGULAR_EXPRESSION "^inconclusive\r?\n")
     add_test(NAME cli-reduce-harness-immediate
       COMMAND stateguard-reduce ${cli_dir}/immediate.sgtrace)
     set_tests_properties(cli-reduce-harness-immediate PROPERTIES
@@ -206,14 +206,14 @@ if(STATEGUARD_BUILD_TESTS)
         COMMAND stateguard-check ${cli_dir}/cuda-${name}.sgtrace)
       set_tests_properties(cli-check-cuda-${name} PROPERTIES
         FIXTURES_REQUIRED cuda_traces LABELS gpu
-        PASS_REGULAR_EXPRESSION "^clean\n$")
+        PASS_REGULAR_EXPRESSION "^clean\r?\n$")
     endforeach()
     foreach(name immediate immediate-delayed)
       add_test(NAME cli-check-cuda-${name}
         COMMAND stateguard-check ${cli_dir}/cuda-${name}.sgtrace)
       set_tests_properties(cli-check-cuda-${name} PROPERTIES
         FIXTURES_REQUIRED cuda_traces LABELS gpu
-        PASS_REGULAR_EXPRESSION "^violation\n[0-9]+ premature_reclaim")
+        PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ premature_reclaim")
     endforeach()
   endif()
 endif()
