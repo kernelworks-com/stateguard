@@ -7,12 +7,15 @@ different request or allocation generation. Stateguard checks recorded lifecycle
 events and names the operation or allocation that broke a lifetime rule.
 
 It is an experimental C++20 library and CLI. It runs on the CPU; an optional
-CUDA harness has been checked on one NVIDIA T4. There is no ready-made
-serving-engine adapter yet: you emit events from your own code.
+CUDA harness has been checked on one NVIDIA T4. The LMCache adapter is
+experimental and checked with CPU mocks at two pinned revisions; other engines
+need their own event producer.
 
 ## Quick start
 
-You need a C++20 compiler and CMake 3.20+ ([build help](docs/BUILDING.md)).
+You need a C++20 compiler and CMake 3.20+. [Build, install, and uninstall](docs/BUILDING.md)
+covers installing into a prefix; [scope and limitations](docs/REFERENCE.md#scope-and-limitations)
+lists what has been tested.
 
 ```sh
 git clone https://github.com/kernelworks-com/stateguard.git
@@ -65,7 +68,9 @@ Optional: [LMCache static-put adapter](docs/LMCACHE.md), with CPU mocked regress
 - `stateguard-timeline FILE` reports, for each cancelled request in a
   timestamped trace, signal, acknowledgment, last access, reuse eligibility, and
   actual reuse, plus memory retained only for cancelled requests
-  ([details](docs/REFERENCE.md#cancellation-timeline)).
+  ([details](docs/REFERENCE.md#cancellation-timeline)). Try
+  `tests/fixtures/cancellation_timeline.sgtrace`: it prints `complete` and
+  `cancellation_to_reuse 5500 ns`.
 - `stateguard-generate --seed N [--fault NAME]` writes a deterministic synthetic
   history, optionally with one planted fault, for testing your own tooling.
 
@@ -132,7 +137,7 @@ ctest --test-dir build --output-on-failure --no-tests=error
 
 [Report a problem](https://github.com/kernelworks-com/stateguard/issues) with a small
 synthetic trace and the result you expected. Do not attach production captures.
-CI setup is described in [.github/CI.md](.github/CI.md).
+CI setup is described in [BUILDING.md](docs/BUILDING.md#continuous-integration).
 
 Stateguard is an independent [Kernelworks](https://github.com/kernelworks-com)
 project. Licensed under [Apache-2.0](LICENSE).

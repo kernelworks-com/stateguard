@@ -206,3 +206,46 @@ if(STATEGUARD_BUILD_TESTS)
     endforeach()
   endif()
 endif()
+
+# CPU alpha delivery. Optional adapter dependencies and test/harness libraries
+# are not part of the installed core package.
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+install(TARGETS stateguard EXPORT stateguardTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+file(RELATIVE_PATH stateguard_lib_from_bin
+  "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
+if(APPLE)
+  set(stateguard_install_rpath "@loader_path/${stateguard_lib_from_bin}")
+elseif(UNIX)
+  set(stateguard_install_rpath "$ORIGIN/${stateguard_lib_from_bin}")
+endif()
+foreach(tool check generate reduce timeline)
+  set_target_properties(stateguard-${tool} PROPERTIES INSTALL_RPATH "${stateguard_install_rpath}")
+  install(TARGETS stateguard-${tool} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endforeach()
+if(STATEGUARD_BUILD_EXAMPLES)
+  foreach(demo instrumented async-copy cancellation)
+    set_target_properties(stateguard-${demo}-demo PROPERTIES INSTALL_RPATH "${stateguard_install_rpath}")
+  endforeach()
+  install(TARGETS stateguard-instrumented-demo stateguard-async-copy-demo
+    stateguard-cancellation-demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+install(DIRECTORY include/stateguard DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY tests/fixtures/ DESTINATION ${CMAKE_INSTALL_DATADIR}/stateguard/traces
+  FILES_MATCHING PATTERN "*.sgtrace")
+install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/stateguard)
+set(package_dir ${CMAKE_INSTALL_LIBDIR}/cmake/stateguard)
+configure_package_config_file(cmake/stateguardConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/stateguardConfig.cmake
+  INSTALL_DESTINATION ${package_dir})
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/stateguardConfigVersion.cmake
+  VERSION ${PROJECT_VERSION} COMPATIBILITY ExactVersion)
+install(EXPORT stateguardTargets NAMESPACE stateguard:: DESTINATION ${package_dir})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/stateguardConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/stateguardConfigVersion.cmake DESTINATION ${package_dir})
+configure_file(cmake/uninstall.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake @ONLY)
+add_custom_target(uninstall
+  COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake)

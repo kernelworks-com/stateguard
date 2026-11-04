@@ -529,6 +529,31 @@ The checker explains observed event relationships; it does not prevent a DMA or
 other backend write, and a CPU trace does not establish backend event
 conformance.
 
+What has been tested ("supported" means these checks ran, not certification):
+
+| Component | Tested on | Scope |
+|---|---|---|
+| Checker, capture, generator, reducer, timeline | macOS arm64 Apple Clang 17; Ubuntu 24.04 GCC 13 and Clang 18 | C++20, tests and synthetic fixtures |
+| Install and CMake consumer | macOS arm64; Ubuntu 24.04 arm64 | Static and shared library, relocated prefix, uninstall |
+| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); older commits only |
+| LMCache static put hooks | Two pinned revisions, CPU mocked NIXL | See [LMCache static put adapter](#lmcache-static-put-adapter) |
+| Windows, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
+
+Known blind spots:
+
+- A clean result does not show that an adapter captured every relevant event or
+  modeled its backend's completion contract faithfully.
+- Capture changes timing. The C++ recorder is not thread-safe, and
+  multi-threaded capture is untested.
+- A rejected lifecycle event can cause follow-on diagnostics.
+- The CUDA engine throws on CUDA errors instead of recording a failed
+  completion. The async-copy demo does not run the routed scenarios (the tests
+  do), and the generator does not produce routed histories.
+- There is no endpoint-quiesced event. The LMCache and CUDA producers do not
+  record timestamps.
+- Traces carry identifiers and structural metadata. Report issues with synthetic
+  traces, not production captures.
+
 ## Relationship to other tools
 
 Native memory checkers, deterministic fault testing, cache provenance systems,
