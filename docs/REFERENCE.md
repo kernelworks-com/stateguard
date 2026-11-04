@@ -410,7 +410,15 @@ deferred and `premature_reclaim` for immediate reclamation on every run. Whether
 the device delivered corrupt bytes is reported but not required. CTest runs it and
 checks its traces under the `gpu` label; those tests need a CUDA device.
 
-Checked on 2026-10-16: Tesla T4 (compute 7.5), driver 580.82.07, CUDA 13.0, GCC
+Checked on 2026-11-04 at commit 9ee081c: Tesla T4 (compute 7.5), driver
+580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 27/27 CTest (5 `gpu` tests), no
+compiler warnings. With 64 MiB copies and 20 runs per configuration, deferred
+reclamation was `clean` in 20/20 runs and immediate reclamation was
+`premature_reclaim` in 20/20 runs, with and without a 20 ms start delay. Without
+the delay the immediate runs left the bytes intact in 20/20; with it every
+immediate run left the cache corrupted, up to all 64 MiB in one run.
+
+Earlier check on 2026-10-16: Tesla T4 (compute 7.5), driver 580.82.07, CUDA 13.0, GCC
 13.3 on Ubuntu 24.04, 17/17 CTest. With 64 MiB copies and 20 runs per
 configuration, the verdicts matched on every run. Without a start delay the copy
 finished before the restaging write in all 20 immediate runs, so the bytes stayed
@@ -535,7 +543,7 @@ What has been tested ("supported" means these checks ran, not certification):
 |---|---|---|
 | Checker, capture, generator, reducer, timeline | macOS arm64 Apple Clang 17; Ubuntu 24.04 GCC 13 and Clang 18 | C++20, tests and synthetic fixtures |
 | Install and CMake consumer | macOS arm64; Ubuntu 24.04 arm64 | Static and shared library, relocated prefix, uninstall |
-| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); older commits only |
+| CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); last checked at commit 9ee081c |
 | LMCache static put hooks | Two pinned revisions, CPU mocked NIXL | See [LMCache static put adapter](#lmcache-static-put-adapter) |
 | Windows, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
 
