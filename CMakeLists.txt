@@ -185,6 +185,16 @@ if(STATEGUARD_BUILD_TESTS)
       set_tests_properties(agent-fix-script PROPERTIES
         ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>")
     endif()
+    # Python trace writer (python/stateguard_trace, standard library only):
+    # writer output, byte-for-byte reproduction of the spec examples and
+    # fixtures, and check()/timeline() against the tools built here.
+    foreach(suite writer conformance tools)
+      add_test(NAME python-trace-${suite}
+        COMMAND ${Python3_EXECUTABLE} -m unittest -v test_${suite}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python/tests)
+      set_tests_properties(python-trace-${suite} PROPERTIES
+        ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>;PYTHONDONTWRITEBYTECODE=1")
+    endforeach()
     # Short synthetic sweep: 3 seeds per fault, every verdict as planted.
     add_test(NAME synthetic-sweep
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/synthetic_sweep.py

@@ -60,11 +60,16 @@ Dependency-free adapter checks run separately:
 python3 -m adapters.lmcache.test_adapter --checker build/stateguard-check
 ```
 
+The adapter writes traces with the [Python trace writer](REFERENCE.md#python-trace-writer)
+(`stateguard_trace`, in `python/`); `adapters/lmcache/trace.py` re-exports it. Install
+it with `pip install -e python/` into the same environment, or run from the
+Stateguard root, where the checkout's copy is used when the package is not installed.
+
 ## Events and completion evidence
 
 `instrument(backend, writer)` returns a context manager restoring instance hooks
 on exit. Install on an empty, idle static backend; drain the loop and stop all
-producers before closing it or finishing the writer. Calls must use the wrapped
+producers before closing it or ending the writer (`writer.end()`). Calls must use the wrapped
 instance methods, including `batched_submit_put_task`. Calling a saved unbound
 method bypasses the submit hook. Existing objects need observation through submit
 before their references change. Do not change the pool, agent, or progress set
@@ -122,7 +127,9 @@ by count and per-record UTF-8 length. Overflow drops the tail and reserves exact
 one `coverage_gap|capture-overflow` plus `end|incomplete`; it cannot become clean.
 Schema-1 integer bounds, nonzero generations, delimiters, and descriptor shape are
 validated before serialization. IDs contain none of `|;:,` or newlines. The writer
-supports the schema-1 subset emitted here, not routed transfer events.
+covers all of schema 1; this adapter emits no routed transfer events. Pass
+`TraceWriter(clock=True)` to stamp the capture with `time|monotonic|<ns>` lines
+for `stateguard-timeline`; the reading is taken when the hook records the event.
 
 Identity maps and hook references live for the capture session; those are **not**
 bounded by the event capacity. Keep sessions finite. The adapter retains Python
