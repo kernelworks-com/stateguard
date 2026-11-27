@@ -549,11 +549,60 @@ compiler, and the core library never includes CUDA headers.
   stream that does not wait for the copy. Deferred reclamation waits for the
   copy's completion; immediate reclamation does not. An optional host function
   delays the copy's start so that it reliably overlaps the restaging.
+- `run_gpu_cancellation` is the device counterpart of the CPU
+  [cancellation scenario](#cancellation-timeline): request-1 loads a prefix,
+  consumes it, and submits a device copy from the cache buffer into an output
+  buffer. Its cancellation is signalled and acknowledged while that copy is in
+  flight. The host keeps both buffers until the copy's CUDA event confirms
+  completion, then retires and reclaims them, and the pool hands both slots out
+  again. The output is read back after the reuse, so the read-back is not part
+  of the measured interval.
+
+Timestamps: both scenarios accept a `TraceClock`, and the demo stamps every
+trace with the steady clock, the same mechanism as the CPU cancellation harness.
+`submit` is stamped before the copy is enqueued, `complete` when the host has
+just seen the CUDA event complete (a query that finds the copy still running
+records nothing), and `retire`, `reclaim`, and the next `allocate` when the host
+performs them. A completion time is therefore an upper bound on when the device
+finished. The checker ignores timestamps, so the verdicts are unchanged.
+
+On a demo trace `stateguard-timeline` is `complete`. In the copy scenario,
+request-1 only consumes a prefix that the loader also leased, so the timeline
+shows its acknowledgment and attributes no retention to the cancellation. In the
+cancellation scenario it reports signal, acknowledgment, last access (the
+confirmed completion of the copy), eligibility, reclaim, and reuse for the cache
+and output buffers, and the `cancellation_to_reuse` interval. With the start
+delay (default 20 ms) the copy is expected to be still running at the
+cancellation and the interval to be close to the delay. It is not required to
+exceed it: the stream can start the delay just before the signal is recorded.
 
 `stateguard-cuda-copy-demo` repeats each configuration and requires `clean` for
-deferred and `premature_reclaim` for immediate reclamation on every run. Whether
-the device delivered corrupt bytes is reported but not required. CTest runs it and
-checks its traces under the `gpu` label; those tests need a CUDA device.
+deferred reclamation and the cancellation, `premature_reclaim` for immediate
+reclamation, and a complete timeline on every run; the cancellation must also
+report `cancellation_to_reuse` every time and deliver intact output. Whether the
+device delivered corrupt bytes in an immediate run, and whether the copy was
+still running when the cancellation was acknowledged, are reported but not
+required. For each configuration it prints the timeline of the last run as a
+measurement on that machine. CTest runs it and checks its traces and their
+timelines under the `gpu` label; those tests need a CUDA device.
+`scripts/colab_gpu_check.sh` also runs `stateguard-timeline`, as text and JSON,
+on the last trace of every configuration, fails unless each is complete and
+each cancellation trace has a cancellation-to-reuse interval, and adds the
+interval to its experiment record.
+
+Timeline on a Tesla T4, measured on 2026-11-27 at commit 549dc0c (driver
+580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 61/61 CTest with 11 `gpu`
+tests, 300 runs per configuration): every run of all six configurations had a
+complete timeline, and the verdicts were as before (`clean` 300/300 for the
+safe and cancellation configurations, `premature_reclaim` 300/300 for
+immediate reclamation, with the cache corrupted in 300/300 delayed runs). In
+both cancellation configurations the copy was still running on the device
+when the cancellation was acknowledged in 300/300 runs, the output arrived
+intact in 300/300, and no buffer was reclaimed while the copy was pending. In
+the last run of each, cancellation-to-reuse was 0.573 ms without a start
+delay and 20.652 ms with the 20 ms delay, and signal-to-acknowledgment was
+336 ns and 314 ns. These are single measurements on one shared machine, not
+a performance claim.
 
 Checked on 2026-11-04 at tag v0.1.0 (commit cb2e159): Tesla T4 (compute 7.5),
 driver 580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 52/52 CTest (5 `gpu`
@@ -669,9 +718,9 @@ order and does not correlate clocks across processes or devices. A timestamp is
 taken when the adapter records the event, so a device may finish earlier than
 `complete` says. An acknowledged cancellation is not proof that an engine stopped
 its work; only completions end accesses. GPU time of mixed batches is not split
-between requests. The CUDA demo does not record timestamps yet; the LMCache
-adapter records them when its writer has a clock (see
-[Python trace writer](#python-trace-writer)).
+between requests. The CUDA demo records timestamps on the host steady clock
+(see [CUDA copy harness](#cuda-copy-harness)); the LMCache adapter records them
+when its writer has a clock (see [Python trace writer](#python-trace-writer)).
 
 ## Machine-readable output
 
@@ -911,8 +960,11 @@ Known blind spots:
 - The CUDA engine throws on CUDA errors instead of recording a failed
   completion. The async-copy demo does not run the routed scenarios (the tests
   do), and the generator does not produce routed histories.
-- There is no endpoint-quiesced event. The CUDA producer does not record
-  timestamps; Python producers record them only when their writer has a clock.
+- There is no endpoint-quiesced event. Python producers record timestamps
+  only when their writer has a clock. The CUDA producer stamps events on the
+  host when it records them, not with device time, so a `complete` time is
+  when the host observed the CUDA event, which can be later than when the copy
+  finished.
 - The LMCache adapter's failed-transfer quiescence option is checked only
   against CPU mocks. Enabled wrongly for a real transport, it can turn a late
   write into a clean result (see [Quiescence contract](LMCACHE.md#quiescence-contract)).

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds Stateguard with the optional CUDA harness on a machine with one NVIDIA
 # GPU (for example a Google Colab GPU runtime), runs the test suite and the
-# CUDA copy demo, and prints an experiment record.
+# CUDA copy demo, builds the cancellation timeline of every timestamped demo
+# trace, and prints an experiment record.
 #
 # usage: colab_gpu_check.sh REF [REPOSITORY_URL]
 #
@@ -26,6 +27,20 @@ step() {
   shift 2
   echo "== ${name}"
   timeout --kill-after=10 "${limit}" "$@"
+  local status=$?
+  if [ "${status}" -ne 0 ]; then
+    [ "${status}" -eq 124 ] && echo "timed out after ${limit}s"
+    failures+=("${name} (exit ${status})")
+  fi
+  return "${status}"
+}
+# Like step, but only the command's output goes to FILE; the step header
+# stays on the terminal, so FILE holds exactly what the command printed.
+step_to() {
+  local out=$1 name=$2 limit=$3
+  shift 3
+  echo "== ${name}"
+  timeout --kill-after=10 "${limit}" "$@" >"${out}" 2>&1
   local status=$?
   if [ "${status}" -ne 0 ]; then
     [ "${status}" -eq 124 ] && echo "timed out after ${limit}s"
@@ -69,9 +84,67 @@ if [ ${#failures[@]} -eq 0 ]; then
   step ctest 900 "${ctest_bin}" --test-dir "${work}/build" --output-on-failure \
     --no-tests=error --timeout 300 >"${log}/ctest.txt" 2>&1
   tail -n 30 "${log}/ctest.txt"
+  traces=${log}/traces
+  mkdir -p "${traces}"
   step demo 1800 "${work}/build/stateguard-cuda-copy-demo" --repeat "${demo_repeat}" \
-    >"${log}/demo.txt" 2>&1
+    --trace-dir "${traces}" >"${log}/demo.txt" 2>&1
   cat "${log}/demo.txt"
+  # Timeline of the last trace of each configuration, as text and JSON. Every
+  # one must be complete; the cancellation traces must also report a
+  # cancellation-to-reuse interval, which goes into the record.
+  for name in safe immediate cancel safe-delayed immediate-delayed cancel-delayed; do
+    step_to "${log}/timeline-${name}.txt" "timeline ${name}" 60 \
+      "${work}/build/stateguard-timeline" "${traces}/cuda-${name}.sgtrace"
+    step_to "${log}/timeline-${name}.json" "timeline ${name} json" 60 \
+      "${work}/build/stateguard-timeline" --json "${traces}/cuda-${name}.sgtrace"
+  done
+  for name in cancel cancel-delayed; do
+    echo "-- stateguard-timeline cuda-${name}.sgtrace"
+    head -n 12 "${log}/timeline-${name}.txt"
+  done
+  step_to "${log}/timeline-summary.txt" "timeline summary" 60 python3 - "${log}" <<'PY'
+import json
+import os
+import sys
+
+log = sys.argv[1]
+failed = False
+for name in ("safe", "immediate", "cancel", "safe-delayed", "immediate-delayed", "cancel-delayed"):
+    try:
+        with open(os.path.join(log, f"timeline-{name}.json")) as f:
+            d = json.load(f)
+    except (OSError, ValueError) as error:
+        print(f"cuda-{name}: FAILED, no timeline JSON ({error})")
+        failed = True
+        continue
+    problems = []
+    if d.get("status") != "complete":
+        problems.append(f"status {d.get('status')}: {'; '.join(d.get('incomplete', []))}")
+    if d.get("clock") != "steady":
+        problems.append(f"clock {d.get('clock')!r}")
+    requests = d.get("requests") or [{}]
+    r = requests[0]
+    start = r.get("signal_ns") if r.get("signal_ns") is not None else r.get("ack_ns")
+    line = f"cuda-{name}: {d.get('status')}"
+    if name.startswith("cancel"):
+        if r.get("signal_ns") is None or r.get("reuse_ns") is None or start is None:
+            problems.append("no signal or no reuse for request-1")
+        elif len(r.get("cancelled_only", [])) != 2:
+            problems.append(f"{len(r.get('cancelled_only', []))} cancelled-only allocations, expected 2")
+        else:
+            reuse = r["reuse_ns"] - start
+            ack = r["ack_ns"] - r["signal_ns"]
+            line += (f", signal_to_ack {ack} ns, cancellation_to_reuse {reuse} ns"
+                     f" ({reuse / 1e6:.3f} ms)")
+    elif r.get("ack_ns") is None:
+        problems.append("no acknowledgment for request-1")
+    if problems:
+        line += ", FAILED: " + ", ".join(problems)
+        failed = True
+    print(line)
+sys.exit(1 if failed else 0)
+PY
+  cat "${log}/timeline-summary.txt"
   # CPU synthetic sweep on the same machine: generated histories for every
   # plantable fault, each checked, a sample reduced.
   step sweep 1800 python3 "${work}/src/scripts/synthetic_sweep.py" --build-dir "${work}/build" \
@@ -95,6 +168,12 @@ echo "cmake:       $("${cmake_bin}" --version 2>/dev/null | head -n1)"
 echo "warnings:    $(grep -c 'warning:' "${log}/build.txt" 2>/dev/null || true)"
 echo "ctest:       $(grep -E 'tests passed|tests failed' "${log}/ctest.txt" 2>/dev/null || echo 'not run')"
 echo "demo repeat: ${demo_repeat}"
+if [ -s "${log}/timeline-summary.txt" ]; then
+  echo "timeline (last run of each configuration, steady clock, this machine):"
+  sed 's/^/  /' "${log}/timeline-summary.txt"
+else
+  echo "timeline:    not run"
+fi
 echo "sweep:       $(grep -m1 '^synthetic sweep:' "${log}/sweep.txt" 2>/dev/null || echo 'not run')"
 if [ ${#failures[@]} -eq 0 ]; then
   echo "result:      all steps succeeded"

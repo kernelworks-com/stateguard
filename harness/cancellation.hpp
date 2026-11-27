@@ -5,9 +5,13 @@
 // or device schedules a cancellation.
 
 #include "async_copy.hpp"
+#include "stateguard/timeline.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
 
 namespace stateguard::harness {
 
@@ -41,5 +45,27 @@ struct CancellationRun {
 // retires and reclaims the output and the cache buffer (after request-2
 // finishes, when it shares the prefix) and the pool hands both slots out again.
 CancellationRun run_cancellation(const CancellationOptions& options);
+
+// The first cancelled request of a timeline, reduced to the intervals a demo
+// prints. Intervals start at the signal, or at the acknowledgment when the
+// trace has no signal, as stateguard-timeline's cancellation_to_reuse does.
+// An interval is unset when either end is unknown or the end precedes the
+// start.
+struct CancellationSummary {
+  TimelineStatus status = TimelineStatus::Incomplete;
+  std::size_t cancelled_requests = 0;
+  // Of the first request.
+  std::size_t cancelled_only = 0;
+  std::optional<std::uint64_t> signal_to_ack_ns;
+  std::optional<std::uint64_t> cancellation_to_eligible_ns;
+  std::optional<std::uint64_t> cancellation_to_reuse_ns;
+};
+
+CancellationSummary summarize_cancellation(const TimelineReport& report);
+
+// One line, for example "complete, 2 cancelled-only allocations,
+// signal_to_ack 300 ns, cancellation_to_eligible 5300 ns,
+// cancellation_to_reuse 5300 ns".
+std::string to_string(const CancellationSummary& summary);
 
 }  // namespace stateguard::harness
