@@ -126,7 +126,7 @@ Every pull request and push to `main` runs:
 |---|---|---|
 | Ubuntu 24.04 | GCC 13 | Release, warnings as errors, install checks |
 | Ubuntu 24.04 | Clang 18 | Debug, address and undefined-behavior sanitizers |
-| macOS 14 | Apple Clang | Release, warnings as errors, install checks |
+| macOS 15 | Apple Clang | Release, warnings as errors, install checks |
 
 No GPU or serving engine is tested. Actions are pinned to commits, and checkout
 credentials are not kept. After the tests pass on `main`, the workflow archives
