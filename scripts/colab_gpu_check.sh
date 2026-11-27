@@ -34,6 +34,20 @@ step() {
   fi
   return "${status}"
 }
+# Like step, but only the command's output goes to FILE; the step header
+# stays on the terminal, so FILE holds exactly what the command printed.
+step_to() {
+  local out=$1 name=$2 limit=$3
+  shift 3
+  echo "== ${name}"
+  timeout --kill-after=10 "${limit}" "$@" >"${out}" 2>&1
+  local status=$?
+  if [ "${status}" -ne 0 ]; then
+    [ "${status}" -eq 124 ] && echo "timed out after ${limit}s"
+    failures+=("${name} (exit ${status})")
+  fi
+  return "${status}"
+}
 
 rm -rf "${work}"
 mkdir -p "${work}"
@@ -79,16 +93,16 @@ if [ ${#failures[@]} -eq 0 ]; then
   # one must be complete; the cancellation traces must also report a
   # cancellation-to-reuse interval, which goes into the record.
   for name in safe immediate cancel safe-delayed immediate-delayed cancel-delayed; do
-    step "timeline ${name}" 60 "${work}/build/stateguard-timeline" \
-      "${traces}/cuda-${name}.sgtrace" >"${log}/timeline-${name}.txt" 2>&1
-    step "timeline ${name} json" 60 "${work}/build/stateguard-timeline" --json \
-      "${traces}/cuda-${name}.sgtrace" >"${log}/timeline-${name}.json" 2>&1
+    step_to "${log}/timeline-${name}.txt" "timeline ${name}" 60 \
+      "${work}/build/stateguard-timeline" "${traces}/cuda-${name}.sgtrace"
+    step_to "${log}/timeline-${name}.json" "timeline ${name} json" 60 \
+      "${work}/build/stateguard-timeline" --json "${traces}/cuda-${name}.sgtrace"
   done
   for name in cancel cancel-delayed; do
     echo "-- stateguard-timeline cuda-${name}.sgtrace"
     head -n 12 "${log}/timeline-${name}.txt"
   done
-  step "timeline summary" 60 python3 - "${log}" >"${log}/timeline-summary.txt" 2>&1 <<'PY'
+  step_to "${log}/timeline-summary.txt" "timeline summary" 60 python3 - "${log}" <<'PY'
 import json
 import os
 import sys
