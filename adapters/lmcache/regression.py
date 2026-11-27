@@ -1,4 +1,4 @@
-"""Run CPU mocked static-put scenarios using the pinned upstream test helpers.
+"""Run CPU mocked static- and dynamic-put scenarios using the pinned upstream test helpers.
 
 Run from the Stateguard root: python -m adapters.lmcache.regression --help
 """
@@ -42,6 +42,12 @@ def load_helpers(checkout, tests):
     return revision, helpers
 
 
+def mock_quiescence(enabled):
+    # The upstream mocks perform no asynchronous access, so a failed transfer
+    # there has ended all access. Never pass this for a real transport.
+    return {'failed_post_is_quiescent': True, 'quiescent_transport': 'mock'} if enabled else {}
+
+
 def scenario(helpers, scenario_name, enabled=True, failed_post_is_quiescent=True):
     """The loop and all producers are drained before hooks are restored."""
     gate = threading.Event()
@@ -61,7 +67,7 @@ def scenario(helpers, scenario_name, enabled=True, failed_post_is_quiescent=True
             raise RuntimeError('injected transfer failure')
     backend.agent.post_blocking.side_effect = transfer
     writer = TraceWriter()
-    capture = instrument(backend, writer, failed_post_is_quiescent=failed_post_is_quiescent) if enabled else None
+    capture = instrument(backend, writer, **mock_quiescence(failed_post_is_quiescent)) if enabled else None
     # Observe task return after all upstream finally blocks, including ref drops.
     original = backend.mem_to_storage
     def schedule(*args, **kwargs):
@@ -98,6 +104,74 @@ def scenario(helpers, scenario_name, enabled=True, failed_post_is_quiescent=True
         loop.close()
         if capture:
             capture.close()
+
+
+def dynamic_scenario(helpers, scenario_name, failed_post_is_quiescent=True):
+    """Dynamic backend put: 'source' and 'failure' in async mode, 'sync' in sync mode."""
+    import asyncio
+    gate = threading.Event()
+    entered = threading.Event()
+    finished = threading.Event()
+    async_mode = scenario_name != 'sync'
+    loop = helpers._LoopThread()
+    backend = helpers._mock_dynamic_backend(loop.loop, gate, async_mode=async_mode)
+    keys, objects = helpers._make_put(1)
+
+    def post_async(handle):
+        entered.set()
+        return 'PROC'
+    backend.agent.post_async.side_effect = post_async
+    outcome = 'ERR' if scenario_name == 'failure' else 'DONE'
+    backend.agent.nixl_agent.check_xfer_state.side_effect = (
+        lambda handle: outcome if gate.is_set() else 'PROC')
+
+    def post_blocking(handle):
+        entered.set()
+        if not gate.wait(5):
+            raise TimeoutError('transfer gate timed out')
+    backend.agent.post_blocking.side_effect = post_blocking
+    # Observe the end of the put's last upstream step: the async completion
+    # task, or mem_to_storage itself in sync mode.
+    name = '_wait_for_transfer' if async_mode else 'mem_to_storage'
+    original = getattr(backend, name)
+    def observed(*args, **kwargs):
+        coroutine = original(*args, **kwargs)
+        async def run():
+            try:
+                return await coroutine
+            finally:
+                finished.set()
+        return run()
+    setattr(backend, name, observed)
+    capture = instrument(backend, TraceWriter(), put_path='dynamic',
+                         **mock_quiescence(failed_post_is_quiescent))
+    submitter = None
+    try:
+        if async_mode:
+            backend.batched_submit_put_task(keys, objects)
+        else:
+            submitter = threading.Thread(target=backend.batched_submit_put_task, args=(keys, objects))
+            submitter.start()
+        if not entered.wait(5):
+            raise TimeoutError('transfer was not entered')
+        if scenario_name == 'source':
+            objects[0].ref_count_down()
+        gate.set()
+        if not finished.wait(5):
+            raise TimeoutError('put did not finish')
+        if submitter is not None:
+            submitter.join(5)
+        # Barrier: callbacks scheduled by the finished task have run.
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop.loop).result(timeout=5)
+        state = {'published': backend._cache_add.called, 'inflight': bool(backend.progress_set),
+                 'refs': objects[0].get_ref_count()}
+        if scenario_name != 'source':
+            objects[0].ref_count_down()
+        return capture.writer.end(), state
+    finally:
+        gate.set()
+        loop.close()
+        capture.close()
 
 
 def check(checker, trace):
@@ -140,6 +214,24 @@ def main():
                 assert state['inflight'] and state['metadata'] and not state['visible']
             (args.output / f'{name}-{repetition}.sgtrace').write_text(trace)
             records.append({'scenario': name, 'returncode': code, 'state': state, 'report': report})
+    for name in ('source', 'failure', 'sync'):
+        for repetition in range(args.repeat):
+            trace, state = dynamic_scenario(helpers, name)
+            code, report = check(args.checker.resolve(), trace)
+            if PINS[revision] == 'fixed' or name != 'failure':
+                assert code == 0, report
+                assert not state['inflight']
+                assert state['published'] == (name != 'failure')
+            else:
+                assert code == 2 and 'cleanup-' in report and 'no observed access completion' in report, report
+                assert state['inflight'] and not state['published']
+            (args.output / f'dynamic-{name}-{repetition}.sgtrace').write_text(trace)
+            records.append({'scenario': 'dynamic-' + name, 'returncode': code, 'state': state,
+                            'report': report})
+    dynamic_unproven, _ = dynamic_scenario(helpers, 'failure', failed_post_is_quiescent=False)
+    dynamic_code, dynamic_report = check(args.checker.resolve(), dynamic_unproven)
+    assert dynamic_code == 2 and 'unproven-failed-transfer-completion' in dynamic_report, dynamic_report
+    (args.output / 'dynamic-unproven-failure.sgtrace').write_text(dynamic_unproven)
     unproven, _ = scenario(helpers, 'failure', failed_post_is_quiescent=False)
     unproven_code, unproven_report = check(args.checker.resolve(), unproven)
     assert unproven_code == 2 and 'unproven-failed-transfer-completion' in unproven_report, unproven_report
@@ -161,6 +253,7 @@ def main():
                          'min_ms': min(samples), 'max_ms': max(samples)}
     result = {'revision': revision, 'kind': PINS[revision], 'records': records,
               'unproven_failure_returncode': unproven_code,
+              'dynamic_unproven_failure_returncode': dynamic_code,
               'environment': {'platform': platform.platform(), 'python': platform.python_version(),
                               'torch': helpers.torch.__version__},
               'timings': timings, 'benchmark_repetitions': args.benchmark_repeat}

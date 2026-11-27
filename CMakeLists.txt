@@ -195,6 +195,17 @@ if(STATEGUARD_BUILD_TESTS)
       set_tests_properties(python-trace-${suite} PROPERTIES
         ENVIRONMENT "STATEGUARD_BUILD_DIR=$<TARGET_FILE_DIR:stateguard-check>;PYTHONDONTWRITEBYTECODE=1")
     endforeach()
+    # Optional LMCache capture (no LMCache dependency): static and dynamic
+    # put paths on standard-library mocks, lock-order interleavings, the
+    # quiescence acknowledgement, and a timestamped capture.
+    if(NOT WIN32)
+      add_test(NAME lmcache-adapter
+        COMMAND ${Python3_EXECUTABLE} -m adapters.lmcache.test_adapter
+                --checker $<TARGET_FILE:stateguard-check>
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+      set_tests_properties(lmcache-adapter PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
     # Short synthetic sweep: 3 seeds per fault, every verdict as planted.
     add_test(NAME synthetic-sweep
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/synthetic_sweep.py
