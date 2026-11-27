@@ -182,7 +182,8 @@ std::vector<OperationId> CudaCopyEngine::collect(bool block) {
       }
       cuda_call(status, "cudaEventQuery");
     }
-    // The event completed, so the copy has stopped touching both buffers.
+    // The event completed, so the copy has stopped touching both buffers. A
+    // clock on the recorder stamps this moment of confirmation.
     recorder_.record(CompleteAccessEvent{(*job)->operation});
     notifications.push_back((*job)->operation);
     job = jobs_.erase(job);
@@ -193,6 +194,16 @@ std::vector<OperationId> CudaCopyEngine::collect(bool block) {
 bool CudaCopyEngine::pending(const OperationId& operation) const {
   return std::any_of(jobs_.begin(), jobs_.end(),
                      [&](const auto& job) { return job->operation == operation; });
+}
+
+bool CudaCopyEngine::running(const OperationId& operation) const {
+  const auto job = std::find_if(jobs_.begin(), jobs_.end(),
+                                [&](const auto& j) { return j->operation == operation; });
+  if (job == jobs_.end()) return false;
+  const auto status = cudaEventQuery((*job)->done);
+  if (status == cudaErrorNotReady) return true;
+  cuda_call(status, "cudaEventQuery");
+  return false;
 }
 
 namespace {
@@ -227,6 +238,7 @@ class StagingStream {
 
 GpuScenarioRun run_gpu_scenario(const GpuScenarioOptions& options) {
   TraceRecorder recorder(options.capture_capacity);
+  if (options.clock.now_ns) recorder.set_clock(options.clock);
   DevicePool pool(recorder, 4, options.slot_bytes);
   StagingStream staging_stream;
   GpuScenarioRun run;
@@ -276,6 +288,70 @@ GpuScenarioRun run_gpu_scenario(const GpuScenarioOptions& options) {
   }
   run.corrupt_bytes = static_cast<std::size_t>(
       std::count_if(cache_bytes.begin(), cache_bytes.end(),
+                    [](unsigned char b) { return b != kPrefix1Byte; }));
+  run.delivered_intact = run.corrupt_bytes == 0;
+  run.trace = recorder.finish();
+  run.capture = recorder.stats();
+  return run;
+}
+
+GpuCancellationRun run_gpu_cancellation(const GpuCancellationOptions& options) {
+  TraceRecorder recorder(options.capture_capacity);
+  if (options.clock.now_ns) recorder.set_clock(options.clock);
+  DevicePool pool(recorder, 3, options.slot_bytes);
+  GpuCancellationRun run;
+  std::vector<unsigned char> output_bytes(options.slot_bytes);
+  {
+    CudaCopyEngine engine(recorder, pool, options.engine);
+    const StateId state("state-1");
+    const RequestId cancelled("request-1");
+    const OperationId load("load-1");
+    const OperationId copy("copy-1");
+
+    const auto staging = pool.acquire();
+    const auto cache = pool.acquire();
+    cuda_call(cudaMemset(pool.address(staging), kPrefix1Byte, options.slot_bytes),
+              "cudaMemset");
+    cuda_call(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    recorder.record(BindStateEvent{to_ref(cache), state, prefix_descriptor("prefix-1")});
+    engine.submit(load, cancelled, staging, cache);
+    engine.wait();
+    recorder.record(PublishEvent{state, to_ref(cache), load});
+    pool.retire(staging);
+    pool.reclaim(staging);
+
+    recorder.record(ConsumeEvent{cancelled, state, to_ref(cache), prefix_descriptor("prefix-1")});
+    // The output reuses the staging slot, which still holds the prefix bytes.
+    // Clear it so that the read-back shows what copy-1 wrote.
+    const auto output = pool.acquire();
+    cuda_call(cudaMemset(pool.address(output), 0, options.slot_bytes), "cudaMemset");
+    cuda_call(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    engine.submit(copy, cancelled, cache, output);
+
+    recorder.record(CancelSignalEvent{cancelled});
+    recorder.record(CancelRequestEvent{cancelled});
+    run.running_at_cancel = engine.running(copy);
+
+    // An acknowledged cancellation does not stop the device. The host keeps
+    // both buffers until the CUDA event confirms copy-1.
+    engine.wait();
+    run.reclaimed_while_pending = engine.pending(copy);
+    void* const output_memory = pool.address(output);
+    pool.retire(output);
+    pool.reclaim(output);
+    pool.retire(cache);
+    pool.reclaim(cache);
+    // The pool reuses the cache slot, then the output slot.
+    pool.acquire();
+    pool.acquire();
+    // Verified after the reuse so that the read-back is not part of the
+    // measured interval. Nothing has written the slot since copy-1.
+    cuda_call(cudaMemcpy(output_bytes.data(), output_memory, options.slot_bytes,
+                         cudaMemcpyDeviceToHost),
+              "cudaMemcpy");
+  }
+  run.corrupt_bytes = static_cast<std::size_t>(
+      std::count_if(output_bytes.begin(), output_bytes.end(),
                     [](unsigned char b) { return b != kPrefix1Byte; }));
   run.delivered_intact = run.corrupt_bytes == 0;
   run.trace = recorder.finish();

@@ -255,6 +255,68 @@ void test_real_clock_interval_covers_the_delay() {
   require(*r.reuse_ns - *r.signal_ns >= 2000000, "measured interval covers the sleep");
 }
 
+bool contains(const std::string& text, const std::string& part) {
+  return text.find(part) != std::string::npos;
+}
+
+void test_summary_of_known_intervals() {
+  ManualClock manual;
+  const auto summary = summarize_cancellation(build_timeline(run_cancellation(manual_options(manual)).trace));
+  require(summary.status == TimelineStatus::Complete && summary.cancelled_requests == 1 &&
+              summary.cancelled_only == 2,
+          "summary of the delayed run");
+  require(summary.signal_to_ack_ns == scheduler_ns, "signal to acknowledgment");
+  require(summary.cancellation_to_eligible_ns == scheduler_ns + copy_ns &&
+              summary.cancellation_to_reuse_ns == scheduler_ns + copy_ns,
+          "intervals start at the signal");
+  require(to_string(summary) ==
+              "complete, 2 cancelled-only allocations, signal_to_ack 300 ns, "
+              "cancellation_to_eligible 5300 ns, cancellation_to_reuse 5300 ns",
+          "summary line: " + to_string(summary));
+
+  auto shared = manual_options(manual);
+  shared.shared_live_consumer = true;
+  const auto one = summarize_cancellation(build_timeline(run_cancellation(shared).trace));
+  require(one.cancelled_only == 1 && contains(to_string(one), "1 cancelled-only allocation,"),
+          "a shared prefix leaves one attributed allocation");
+
+  auto missing = manual_options(manual);
+  missing.complete_copy = false;
+  const auto open = summarize_cancellation(build_timeline(run_cancellation(missing).trace));
+  require(open.status == TimelineStatus::Incomplete && !open.cancellation_to_eligible_ns &&
+              !open.cancellation_to_reuse_ns && open.signal_to_ack_ns == scheduler_ns,
+          "unknown stages give no interval");
+  require(contains(to_string(open), "incomplete,") &&
+              contains(to_string(open), "no cancellation_to_reuse"),
+          "an incomplete summary says what is missing");
+}
+
+void test_summary_without_signal_or_request() {
+  const RequestId r("r-1");
+  const AllocationRef a{AllocationId("a"), 1};
+  Trace ack_only;
+  ack_only.events = {TimestampEvent{"m", 10}, AllocateEvent{a.allocation, 1, 8, "d"},
+                     BindStateEvent{a, StateId("s"), descriptor()},
+                     PublishEvent{StateId("s"), a, std::nullopt},
+                     TimestampEvent{"m", 20}, ConsumeEvent{r, StateId("s"), a, descriptor()},
+                     TimestampEvent{"m", 30}, CancelRequestEvent{r},
+                     TimestampEvent{"m", 45}, RetireEvent{a},
+                     ReclaimEvent{a},
+                     TimestampEvent{"m", 70}, AllocateEvent{a.allocation, 2, 8, "d"},
+                     EndTraceEvent{true}};
+  const auto summary = summarize_cancellation(build_timeline(ack_only));
+  require(summary.status == TimelineStatus::Complete && !summary.signal_to_ack_ns,
+          "no signal, no signal_to_ack");
+  require(summary.cancellation_to_eligible_ns == 15 && summary.cancellation_to_reuse_ns == 40,
+          "without a signal, intervals start at the acknowledgment");
+
+  Trace none;
+  none.events = {TimestampEvent{"m", 1}, EndTraceEvent{true}};
+  require(to_string(summarize_cancellation(build_timeline(none))) ==
+              "complete, no cancelled request",
+          "a trace without cancellations");
+}
+
 // Two cancelled requests share one buffer; a third revives a second buffer.
 void test_deduplication_and_revival() {
   const AllocationRef shared{AllocationId("buffer-1"), 1};
@@ -335,6 +397,8 @@ int main() {
       {"shared live consumer prevents attribution", test_shared_live_consumer_prevents_attribution},
       {"missing completion is incomplete", test_missing_completion_is_incomplete},
       {"real clock interval covers the delay", test_real_clock_interval_covers_the_delay},
+      {"summary of known intervals", test_summary_of_known_intervals},
+      {"summary without signal or request", test_summary_without_signal_or_request},
       {"deduplication and revival", test_deduplication_and_revival},
       {"incomplete evidence", test_incomplete_evidence},
   };

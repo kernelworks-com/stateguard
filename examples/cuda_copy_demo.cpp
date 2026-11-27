@@ -1,18 +1,24 @@
-// Runs the CUDA copy scenario under safe and induced-bug configurations,
-// checks every captured trace, and reports whether the device delivered the
-// staged bytes. Needs a CUDA device; built only with STATEGUARD_ENABLE_CUDA.
+// Runs the CUDA copy scenario under safe and induced-bug configurations and
+// the CUDA cancellation scenario, checks every captured trace, builds its
+// cancellation timeline, and reports whether the device delivered the staged
+// bytes. Needs a CUDA device; built only with STATEGUARD_ENABLE_CUDA.
 //
 // usage: stateguard-cuda-copy-demo [--repeat N] [--mib N] [--delay-ms N]
 //                                  [--trace-dir DIR]
 //
-// The checker verdict is expected to be the same on every run: clean for
-// deferred reclamation, premature_reclaim for immediate reclamation. Whether
-// the early reclaim actually corrupted the copy depends on device timing and
-// is reported, not required. With --trace-dir, the last trace of each
+// Every trace is stamped with the steady clock. The checker verdict is
+// expected to be the same on every run: clean for deferred reclamation and
+// for the cancellation, premature_reclaim for immediate reclamation. The
+// timeline is expected complete on every run, and the cancellation scenario
+// must report a cancellation-to-reuse interval. Whether the early reclaim
+// actually corrupted the copy depends on device timing and is reported, not
+// required. The timeline intervals printed are those of the last run, a
+// measurement on this machine only. With --trace-dir, the last trace of each
 // configuration is written to DIR/cuda-<name>.sgtrace. Exits 0 when every
-// verdict matches, every deferred run delivered intact bytes, and no CUDA
-// call failed.
+// expectation holds, every deferred and cancellation run delivered intact
+// bytes, and no CUDA call failed.
 
+#include "cancellation.hpp"
 #include "cuda_copy.hpp"
 #include "stateguard/stateguard.hpp"
 
@@ -24,6 +30,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -37,7 +44,45 @@ struct Configuration {
   std::string label;
   GpuScenarioOptions options;
   CheckStatus expected;
+  // Runs run_gpu_cancellation with the same clock, engine, and slot size.
+  bool cancellation = false;
 };
+
+// What one run of either scenario produced.
+struct Outcome {
+  Trace trace;
+  bool delivered_intact = false;
+  std::size_t corrupt_bytes = 0;
+  // Copy pending at reclaim for the copy scenario; for the cancellation,
+  // copy still running on the device when the cancellation was acknowledged.
+  bool device_flag = false;
+  bool reclaimed_while_pending = false;
+};
+
+Outcome run_configuration(const Configuration& configuration) {
+  const auto& options = configuration.options;
+  Outcome outcome;
+  if (configuration.cancellation) {
+    GpuCancellationOptions cancel;
+    cancel.clock = options.clock;
+    cancel.engine = options.engine;
+    cancel.slot_bytes = options.slot_bytes;
+    auto run = run_gpu_cancellation(cancel);
+    outcome.trace = std::move(run.trace);
+    outcome.delivered_intact = run.delivered_intact;
+    outcome.corrupt_bytes = run.corrupt_bytes;
+    outcome.device_flag = run.running_at_cancel;
+    outcome.reclaimed_while_pending = run.reclaimed_while_pending;
+  } else {
+    auto run = run_gpu_scenario(options);
+    outcome.trace = std::move(run.trace);
+    outcome.delivered_intact = run.delivered_intact;
+    outcome.corrupt_bytes = run.corrupt_bytes;
+    outcome.device_flag = run.reclaimed_while_pending;
+    outcome.reclaimed_while_pending = run.reclaimed_while_pending;
+  }
+  return outcome;
+}
 
 std::optional<long> parse_count(const char* text) {
   char* end = nullptr;
@@ -104,50 +149,80 @@ int main(int argc, char** argv) {
       const std::string suffix = delayed ? "-delayed" : "";
       const std::string timing =
           delayed ? ", copy start delayed " + std::to_string(delay_ms) + " ms" : "";
+      GpuScenarioOptions options;
+      options.clock = steady_trace_clock();
+      options.engine.start_delay = delay;
+      options.slot_bytes = static_cast<std::size_t>(mib) << 20;
       for (const auto policy : {ReclaimPolicy::Deferred, ReclaimPolicy::Immediate}) {
-        GpuScenarioOptions options;
         options.reclaim = policy;
-        options.engine.start_delay = delay;
-        options.slot_bytes = static_cast<std::size_t>(mib) << 20;
         const bool deferred = policy == ReclaimPolicy::Deferred;
         configurations.push_back(
             {(deferred ? "safe" : "immediate") + suffix,
              (deferred ? "safe deferred reclamation" : "induced immediate reclamation") +
                  timing,
-             options, deferred ? CheckStatus::Clean : CheckStatus::Violation});
+             options, deferred ? CheckStatus::Clean : CheckStatus::Violation, false});
       }
+      options.reclaim = ReclaimPolicy::Deferred;
+      configurations.push_back({"cancel" + suffix,
+                                "cancellation while the copy is in flight" + timing, options,
+                                CheckStatus::Clean, true});
     }
 
     bool as_expected = true;
     for (const auto& configuration : configurations) {
       long matched = 0;
       long intact = 0;
-      long pending_at_reclaim = 0;
+      long device_flag = 0;
+      long timeline_complete = 0;
+      long with_interval = 0;
+      long reclaimed_while_pending = 0;
       std::size_t max_corrupt = 0;
       std::optional<std::string> first_finding;
       std::optional<Trace> last_trace;
+      CancellationSummary last_summary;
       for (long run_index = 0; run_index < repeat; ++run_index) {
-        const auto run = run_gpu_scenario(configuration.options);
+        auto run = run_configuration(configuration);
         const auto report = check(run.trace);
+        // The checker ignores timestamps; the timeline reads them.
+        const auto summary = summarize_cancellation(build_timeline(run.trace));
         if (report.status == configuration.expected) ++matched;
+        if (summary.status == TimelineStatus::Complete) ++timeline_complete;
+        if (summary.cancellation_to_reuse_ns) ++with_interval;
         if (run.delivered_intact) ++intact;
-        if (run.reclaimed_while_pending) ++pending_at_reclaim;
+        if (run.device_flag) ++device_flag;
+        if (run.reclaimed_while_pending) ++reclaimed_while_pending;
         if (run.corrupt_bytes > max_corrupt) max_corrupt = run.corrupt_bytes;
         if (const auto* finding = first_confirmed(report); finding && !first_finding) {
           first_finding = std::to_string(finding->event_index) + ' ' +
                           to_string(finding->category) + ": " + finding->message;
         }
-        last_trace = run.trace;
+        last_trace = std::move(run.trace);
+        last_summary = summary;
       }
       const bool deferred = configuration.options.reclaim == ReclaimPolicy::Deferred;
+      const bool cancellation = configuration.cancellation;
       std::cout << configuration.label << '\n'
                 << "  checker: " << matched << '/' << repeat << ' '
                 << to_string(configuration.expected) << '\n';
       if (first_finding) std::cout << "  first finding: " << *first_finding << '\n';
-      std::cout << "  device: copy still pending at reclaim in " << pending_at_reclaim << '/'
-                << repeat << "; cache intact in " << intact << '/' << repeat
-                << "; most corrupt bytes in one run " << max_corrupt << '\n';
-      if (matched != repeat || (deferred && intact != repeat)) {
+      if (cancellation) {
+        std::cout << "  device: copy still running at cancellation in " << device_flag << '/'
+                  << repeat << "; output intact in " << intact << '/' << repeat
+                  << "; reclaimed while pending in " << reclaimed_while_pending << '/'
+                  << repeat << '\n';
+      } else {
+        std::cout << "  device: copy still pending at reclaim in " << device_flag << '/'
+                  << repeat << "; cache intact in " << intact << '/' << repeat
+                  << "; most corrupt bytes in one run " << max_corrupt << '\n';
+      }
+      std::cout << "  timeline: " << timeline_complete << '/' << repeat << " complete";
+      if (cancellation) {
+        std::cout << ", cancellation_to_reuse in " << with_interval << '/' << repeat;
+      }
+      std::cout << "\n  timeline of the last run (steady clock, measured on this machine): "
+                << to_string(last_summary) << '\n';
+      if (matched != repeat || (deferred && intact != repeat) || timeline_complete != repeat ||
+          (cancellation && (with_interval != repeat || reclaimed_while_pending != 0))) {
         std::cout << "  unexpected result\n";
         as_expected = false;
       }
