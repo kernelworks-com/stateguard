@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stateguard-trace"
+dynamic = ["version"]
+description = "Write and check Stateguard .sgtrace lifecycle traces (schema 1)"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/kernelworks-com/stateguard"
+Documentation = "https://github.com/kernelworks-com/stateguard/blob/main/docs/REFERENCE.md#python-trace-writer"
+
+[tool.setuptools]
+packages = ["stateguard_trace"]
+
+[tool.setuptools.dynamic]
+version = {attr = "stateguard_trace.__version__"}

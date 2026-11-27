@@ -92,7 +92,7 @@ def scenario(helpers, scenario_name, enabled=True, failed_post_is_quiescent=True
                  'metadata': bool(backend.key_dict), 'refs': objects[0].get_ref_count()}
         if scenario_name == 'failure':
             objects[0].ref_count_down()
-        return writer.finish() if enabled else None, state
+        return writer.end() if enabled else None, state
     finally:
         gate.set()
         loop.close()

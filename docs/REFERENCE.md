@@ -325,6 +325,95 @@ An adapter that cannot observe part of the lifecycle should record its own
 `coverage_gap` before the affected events. Findings after the gap are then
 `[unconfirmed]` instead of being reported as violations.
 
+## Python trace writer
+
+`stateguard_trace` (in `python/`, Python 3.9+, standard library only, no
+dependencies) writes schema-1 traces from Python and runs the tools on them.
+Install it from a checkout with `pip install -e python/`, or directly:
+
+```sh
+pip install "git+https://github.com/kernelworks-com/stateguard#subdirectory=python"
+```
+
+```python
+from stateguard_trace import Descriptor, TraceWriter, check
+
+desc = Descriptor('demo', 'model-r1', 'cpu-cache', 'layer-0', 'prefix-42',
+                  0, 16, 'fp16', 'row-major', 'absolute')
+with TraceWriter(clock=True) as trace:      # stamps time|monotonic|<ns> lines
+    trace.allocate('buffer-1', 1, 4096, 'cpu')
+    trace.bind_state('buffer-1', 1, 'state-1', desc)
+    trace.submit('copy-1', 'request-1', [('w', 'buffer-1', 1)])
+    trace.complete('copy-1')                 # only after the access has ended
+    trace.publish('state-1', 'buffer-1', 1, 'copy-1')
+    trace.consume('request-1', 'state-1', 'buffer-1', 1, desc)
+    trace.finish('request-1')
+    trace.retire('buffer-1', 1)
+    trace.reclaim('buffer-1', 1)
+report = check(trace.getvalue())             # stateguard-check --json -
+print(report['status'], report['exit_code'])  # clean 0
+```
+
+- **Events.** One method per event kind of the
+  [format](TRACE-FORMAT.md#events), with the same name and field order:
+  `allocate`, `bind_state`, `submit(operation, request, leases, dependencies,
+  route=None)`, `publish(state, allocation, generation, operation=None)`,
+  `consume`, `cancel`, `cancel_signal`, `finish` (a request ended normally),
+  `complete(operation, outcome='succeeded', evidence=None)`, `connect`,
+  `expire`, `retire`, `reclaim`, `coverage_gap`, and `time`. A lease is
+  `(access, allocation, generation)`, a route `(endpoint, epoch, tag)`
+  (`Route`), and a descriptor ten values (`Descriptor`) with integer token
+  bounds. Output is the canonical form `serialize_trace` writes; the test suite
+  rebuilds every example in the format document and every fixture in
+  `tests/fixtures/` from these calls and compares the bytes.
+- **Validation.** Every value is checked against the format's value types
+  before anything is recorded: identifiers reject `|;:,` and newlines, text
+  rejects `|` and newlines, integers are Python `int`s from 0 to 2^64 − 1,
+  generations and epochs are nonzero, `token_end` is not less than
+  `token_begin`. A bad value raises `ValueError` naming the field.
+- **Ending.** `end(complete=True)` writes the end marker; `TraceWriter.end()`
+  returns the trace text, and `getvalue()` returns it at any time. Used as a
+  context manager, a writer ends on exit, with `end|incomplete` if an exception
+  left the block. Any event after the end raises `RuntimeError`. A recorded
+  `coverage_gap` does not change the marker; pass `complete=False` when events
+  were lost.
+- **Writers.** `TraceWriter(capacity=100000, max_record_bytes=4096)` keeps the
+  trace in memory. `FileTraceWriter(path_or_file)` writes each line as it is
+  recorded (UTF-8 with `\n` on every platform) and is unbounded by default.
+  When a bound is hit, that record and every later one are dropped, and the end
+  is `coverage_gap|capture-overflow` plus `end|incomplete`. `time` lines count
+  toward the capacity.
+- **Clock.** Without `clock`, no `time` lines are written. `clock=True` reads `time.monotonic_ns` under the name
+  `monotonic`; any callable returning integer nanoseconds can be passed
+  instead, with `clock_name`. The writer reads the clock under its lock for
+  every record, and writes `time|<clock_name>|<ns>` before the record when the
+  reading differs from the previous one; the pair is kept or dropped together.
+  A trace therefore has one clock with readings that do not decrease, as
+  `stateguard-timeline` requires; a decreasing reading raises `ValueError`.
+  Without a clock, `time(clock, ns)` records readings by hand under the same
+  rule. A reading is taken when the producer records the event, not when a
+  device performed it.
+- **Threads.** `writer.lock` is reentrant. Trace order is the order in which
+  records take it; record while holding the lock that publishes an effect to
+  keep the [producer contract](TRACE-FORMAT.md#producer-contract) across
+  threads.
+
+`check(path_or_text, checker="stateguard-check", primary_only=False)` runs the
+checker with `--json` and returns its JSON object as a dict, with the keys in
+[machine-readable output](#machine-readable-output): `status`, `exit_code`,
+`capture_complete`, and `diagnostics`. `timeline(path_or_text,
+tool="stateguard-timeline")` does the same for the timeline. The input is a
+path (`str` or `os.PathLike`), trace text (a string containing a newline or
+starting with the header), bytes, or a `TraceWriter`; text is passed on
+standard input with `-`. The tool is a name looked up on `PATH` or a path.
+Exit codes 0, 1, and 2 are results, reported in `exit_code` and `status`.
+`ToolNotFoundError` means the tool could not be found or started,
+`TraceInputError` (with the tool's `message`) means it exited 3 because the
+trace was unreadable or malformed, and `ToolError`, their base class, covers any
+other failure.
+
+The package version (0.3.0) is independent of the C++ project version.
+
 ## Async-copy harness
 
 `harness/async_copy.hpp` is a small instrumented native program, built as the
@@ -630,7 +719,8 @@ taken when the adapter records the event, so a device may finish earlier than
 `complete` says. An acknowledged cancellation is not proof that an engine stopped
 its work; only completions end accesses. GPU time of mixed batches is not split
 between requests. The CUDA demo records timestamps on the host steady clock
-(see [CUDA copy harness](#cuda-copy-harness)); the LMCache adapter does not yet.
+(see [CUDA copy harness](#cuda-copy-harness)); the LMCache adapter records them
+when its writer has a clock (see [Python trace writer](#python-trace-writer)).
 
 ## Machine-readable output
 
@@ -852,6 +942,7 @@ What has been tested ("supported" means these checks ran, not certification):
 | Install and CMake consumer | macOS arm64; Ubuntu 24.04 arm64 | Static and shared library, relocated prefix, uninstall |
 | CUDA copy harness | One Tesla T4, driver 580.82.07, CUDA 13.0 | See [CUDA copy harness](#cuda-copy-harness); last checked at tag v0.1.0, 500 runs per configuration |
 | LMCache static put hooks | Two pinned revisions, CPU mocked NIXL | See [LMCache static put adapter](#lmcache-static-put-adapter) |
+| Python trace writer | macOS arm64, Python 3.9.6 and 3.11.8 | 40 `unittest` tests against the Release tools, including byte-for-byte reproduction of every spec example and fixture; Linux and Windows CI runs added, results not yet recorded |
 | Windows install and Python adapter, distributed clocks, RDMA, multi-GPU, production engines | Not tested | No support claim |
 
 Known blind spots:
@@ -869,10 +960,11 @@ Known blind spots:
 - The CUDA engine throws on CUDA errors instead of recording a failed
   completion. The async-copy demo does not run the routed scenarios (the tests
   do), and the generator does not produce routed histories.
-- There is no endpoint-quiesced event. The LMCache producer does not record
-  timestamps. The CUDA producer stamps events on the host when it records them,
-  not with device time, so a `complete` time is when the host observed the CUDA
-  event, which can be later than when the copy finished.
+- There is no endpoint-quiesced event. Python producers record timestamps
+  only when their writer has a clock. The CUDA producer stamps events on the
+  host when it records them, not with device time, so a `complete` time is
+  when the host observed the CUDA event, which can be later than when the copy
+  finished.
 - Traces carry identifiers and structural metadata. Report issues with synthetic
   traces, not production captures.
 
@@ -928,9 +1020,10 @@ measurements are not serving throughput or latency estimates and make no product
 overhead promise. Source contents and real transfer corruption are not measured.
 Identity maps remain session-sized even when trace storage is bounded.
 
-Dependency-free checks: 13 tests, including page-generation reuse, ref-count
+Dependency-free checks: 14 tests, including page-generation reuse, ref-count
 transitions, restoration preserving pending progress, alias/pin rejection, schema
-validation, overflow, and eight-thread capture of 1,000 transactions. Both Release
+validation, overflow, a timestamped capture, and eight-thread capture of 1,000
+transactions. Both Release
 and ASan/UBSan checker executables accept the conformance traces. Engine concurrency
 beyond the gated put/caller pattern remains unverified. CI runs the dependency-free
 checks without installing LMCache; pinned engine reproduction is a separate command.
