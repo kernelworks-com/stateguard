@@ -1,4 +1,4 @@
-"""Optional, pinned LMCache static NIXL put instrumentation."""
+"""Optional, pinned LMCache NIXL put instrumentation (static and dynamic backends)."""
 from .adapter import instrument
 from .trace import TraceWriter
 
