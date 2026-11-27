@@ -34,7 +34,7 @@ class WriterTests(unittest.TestCase):
 
     def test_closed(self):
         writer = TraceWriter()
-        writer.finish()
+        writer.end()
         with self.assertRaises(RuntimeError):
             writer.allocate('page', 1, 4, 'cpu')
 
@@ -42,8 +42,8 @@ class WriterTests(unittest.TestCase):
         writer = TraceWriter(1)
         writer.allocate('page', 1, 4, 'cpu')
         for _ in range(100):
-            writer.lifecycle('reclaim', ('page', 1))
-        trace = writer.finish()
+            writer.reclaim('page', 1)
+        trace = writer.end()
         self.assertEqual(len(trace.splitlines()), 4)
         self.assertEqual(trace.count('coverage_gap'), 1)
         self.assertTrue(trace.endswith('end|incomplete\n'))
@@ -53,7 +53,7 @@ class WriterTests(unittest.TestCase):
     def test_zero_capacity_and_record_bound(self):
         for writer in (TraceWriter(0), TraceWriter(10, 64)):
             writer.allocate('a' * 65, 1, 0, 'cpu')
-            self.assertIn('coverage_gap|capture-overflow', writer.finish())
+            self.assertIn('coverage_gap|capture-overflow', writer.end())
 
     def test_concurrent_transactions(self):
         writer = TraceWriter(4000)
@@ -61,11 +61,11 @@ class WriterTests(unittest.TestCase):
             with writer.lock:
                 name = f'page-{n}'
                 writer.allocate(name, 1, 32, 'cpu')
-                writer.lifecycle('retire', (name, 1))
-                writer.lifecycle('reclaim', (name, 1))
+                writer.retire(name, 1)
+                writer.reclaim(name, 1)
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(transaction, range(1000)))
-        trace = writer.finish()
+        trace = writer.end()
         self.assertEqual(len(trace.splitlines()), 3002)
         if CHECKER:
             result = self.report(trace)
@@ -74,11 +74,11 @@ class WriterTests(unittest.TestCase):
     def test_wire_format(self):
         writer = TraceWriter()
         writer.allocate('page', 1, 32, 'cpu')
-        writer.submit('copy', [('r', ('page', 1))])
-        writer.complete('copy', True)
-        writer.lifecycle('retire', ('page', 1))
-        writer.lifecycle('reclaim', ('page', 1))
-        self.assertEqual(writer.finish(), 'STATEGUARD_TRACE|1\nallocate|page|1|32|cpu\n'
+        writer.submit('copy', 'put', [('r', ('page', 1))])
+        writer.complete('copy', 'failed')
+        writer.retire('page', 1)
+        writer.reclaim('page', 1)
+        self.assertEqual(writer.end(), 'STATEGUARD_TRACE|1\nallocate|page|1|32|cpu\n'
                          'submit|copy|put|r:page:1|\ncomplete|copy|failed\n'
                          'retire|page|1\nreclaim|page|1\nend|complete\n')
 
@@ -123,7 +123,7 @@ class CaptureTests(unittest.TestCase):
         capture.close()
         self.assertNotIn('ref_count_down', first.__dict__)
         self.assertNotIn('pin', first.__dict__)
-        trace = writer.finish()
+        trace = writer.end()
         if CHECKER:
             result = self.report(trace)
             self.assertEqual(result.returncode, 0, result.stdout)
@@ -160,8 +160,25 @@ class CaptureTests(unittest.TestCase):
             for _ in range(2):
                 self.assertEqual(backend.pool.pop(), 7)
                 backend.pool.push(7)
-        trace = writer.finish()
+        trace = writer.end()
         self.assertIn('allocate|slot-1|2|0|storage', trace)
+        if CHECKER:
+            result = self.report(trace)
+            self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_timestamped_capture(self):
+        pool = SimpleNamespace(pop=lambda: 3, push=lambda index: None)
+        backend = SimpleNamespace(progress_set=set(), key_dict={}, pool=pool,
+                                  agent=SimpleNamespace(post_blocking=lambda handle: None))
+        for name in ('batched_submit_put_task', 'mem_to_storage', 'add_key_to_dict',
+                     '_collect_metadata_with_lock'):
+            setattr(backend, name, lambda *args, **kwargs: None)
+        writer = TraceWriter(clock=True)
+        with instrument(backend, writer):
+            backend.pool.pop()
+            backend.pool.push(3)
+        trace = writer.end()
+        self.assertRegex(trace, r'^STATEGUARD_TRACE\|1\ntime\|monotonic\|[0-9]+\nallocate\|slot-1\|1\|')
         if CHECKER:
             result = self.report(trace)
             self.assertEqual(result.returncode, 0, result.stdout)
@@ -178,12 +195,12 @@ class CaptureTests(unittest.TestCase):
 
     def test_metadata_format_validation(self):
         writer = TraceWriter()
-        for kind, fields in [('allocate', ('page', '0', '4', 'cpu')),
-                             ('submit', ('op', 'req', 'r:bad:ref:1', '')),
-                             ('publish', ('state', 'bad,ref', '1', '-')),
-                             ('complete', ('op', 'unknown'))]:
+        for call in (lambda: writer.allocate('page', 0, 4, 'cpu'),
+                     lambda: writer.submit('op', 'req', [('r', 'bad:ref', 1)]),
+                     lambda: writer.publish('state', 'bad,ref', 1),
+                     lambda: writer.complete('op', 'unknown')):
             with self.assertRaises(ValueError):
-                writer.emit(kind, *fields)
+                call()
 
 
 if __name__ == '__main__':

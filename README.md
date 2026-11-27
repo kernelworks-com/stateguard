@@ -90,6 +90,8 @@ package is used with `find_package(stateguard 0.2.0 EXACT CONFIG)` and
 rule, the reducer, and the generator; the [trace format](docs/TRACE-FORMAT.md)
 is specified separately.
 
+From Python, the dependency-free `stateguard_trace` package in `python/` writes traces, optionally timestamped, and returns the checker's JSON report ([details](docs/REFERENCE.md#python-trace-writer)).
+
 ## Catch a reclaim bug in running code
 
 The [async-copy harness](harness/async_copy.hpp) is a buffer pool, a copy engine

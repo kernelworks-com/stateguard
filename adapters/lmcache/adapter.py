@@ -5,7 +5,7 @@ from functools import wraps
 
 # Synthetic descriptors describe equality of observed keys within this capture,
 # not semantic equivalence across models, processes, or captures.
-DESCRIPTOR = ('capture', 'opaque', 'lmcache-static', 'kv', 'key', '0', '1', 'opaque', 'opaque', 'opaque')
+DESCRIPTOR = ('capture', 'opaque', 'lmcache-static', 'kv', 'key', 0, 1, 'opaque', 'opaque', 'opaque')
 
 
 class _Progress(set):
@@ -71,8 +71,8 @@ class Capture:
                     result = original(*args, **kwargs)
                     count = obj.get_ref_count()
                     if count == 0 and page['live']:
-                        self.writer.lifecycle('retire', ref)
-                        self.writer.lifecycle('reclaim', ref)
+                        self.writer.retire(*ref)
+                        self.writer.reclaim(*ref)
                         page['live'] = False
                     elif count > 0 and not page['live']:
                         raise ValueError('resurrected MemoryObj is unsupported; use a new object')
@@ -90,15 +90,15 @@ class Capture:
     def discard(self, key):
         entry = self.keys.get(key)
         if entry is not None and not entry['published'] and key in self.backend.key_dict:
-            self.writer.emit('publish', entry['state'], *map(str, entry['ref']), entry['op'])
+            self.writer.publish(entry['state'], *entry['ref'], entry['op'])
             entry['published'] = True
         for call in self.active:
             if key in call['remaining']:
                 call['remaining'].remove(key)
                 if not call['remaining']:
-                    self.writer.complete(call['cleanup'], call['failed'])
-                    self.writer.lifecycle('retire', call['marker'])
-                    self.writer.lifecycle('reclaim', call['marker'])
+                    self.writer.complete(call['cleanup'], 'failed' if call['failed'] else 'succeeded')
+                    self.writer.retire(*call['marker'])
+                    self.writer.reclaim(*call['marker'])
         self.active[:] = [call for call in self.active if call['remaining']]
 
     def install(self):
@@ -130,9 +130,9 @@ class Capture:
                     call = {'hold': self.unique('put-'), 'remaining': set(keys), 'failed': False,
                             'sources': [self.track(obj) for obj in mem_objs], 'slots': [],
                             'cleanup': self.unique('cleanup-'), 'marker': (self.unique('metadata-'), 1)}
-                    self.writer.submit(call['hold'], [('r', ref) for ref in call['sources']])
+                    self.writer.submit(call['hold'], 'put', [('r', ref) for ref in call['sources']])
                     self.writer.allocate(*call['marker'], 0, 'put-metadata')
-                    self.writer.submit(call['cleanup'], [('w', call['marker'])])
+                    self.writer.submit(call['cleanup'], 'put', [('w', call['marker'])])
                     self.active.append(call)
                 async def run():
                     token = self.current.set(call)
@@ -162,8 +162,8 @@ class Capture:
             def call(index):
                 with self.writer.lock:
                     slot = self.slots[index]
-                    self.writer.lifecycle('retire', slot['ref'])
-                    self.writer.lifecycle('reclaim', slot['ref'])
+                    self.writer.retire(*slot['ref'])
+                    self.writer.reclaim(*slot['ref'])
                     slot['live'] = False
                     return original(index)
             return call
@@ -176,9 +176,9 @@ class Capture:
                     context = self.current.get()
                     state = self.unique('state-')
                     ref = self.slots[index]['ref']
-                    entry = {'state': state, 'ref': ref, 'op': '-', 'published': False}
+                    entry = {'state': state, 'ref': ref, 'op': None, 'published': False}
                     self.keys[key] = entry
-                    self.writer.emit('bind_state', *map(str, ref), state, *DESCRIPTOR)
+                    self.writer.bind_state(*ref, state, DESCRIPTOR)
                     context['slots'].append(entry)
                     return result
             return call
@@ -193,7 +193,7 @@ class Capture:
                     operation = self.unique('transfer-')
                     for entry in context['slots']:
                         entry['op'] = operation
-                    self.writer.submit(operation, [('r', ref) for ref in context['sources']] +
+                    self.writer.submit(operation, 'put', [('r', ref) for ref in context['sources']] +
                                        [('w', entry['ref']) for entry in context['slots']])
                 # Never hold the capture lock across blocking transport work.
                 try:
@@ -202,10 +202,10 @@ class Capture:
                     with self.writer.lock:
                         context['failed'] = True
                         if self.failed_post_is_quiescent:
-                            self.writer.complete(operation, True)
-                            self.writer.complete(context['hold'], True)
+                            self.writer.complete(operation, 'failed')
+                            self.writer.complete(context['hold'], 'failed')
                         else:
-                            self.writer.emit('coverage_gap', 'unproven-failed-transfer-completion')
+                            self.writer.coverage_gap('unproven-failed-transfer-completion')
                     raise
                 with self.writer.lock:
                     self.writer.complete(operation)
@@ -221,8 +221,8 @@ class Capture:
                     for key, metadata in zip(keys, result):
                         if metadata is not None:
                             entry = self.keys[key]
-                            self.writer.emit('consume', self.unique('read-'), entry['state'],
-                                             *map(str, entry['ref']), *DESCRIPTOR)
+                            self.writer.consume(self.unique('read-'), entry['state'],
+                                                *entry['ref'], DESCRIPTOR)
                 return result
             return call
         self.wrap(backend, '_collect_metadata_with_lock', collect)

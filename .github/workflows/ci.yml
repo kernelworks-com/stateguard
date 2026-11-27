@@ -64,9 +64,27 @@ jobs:
         run: cmake --build build --config ${{ matrix.mode }} --parallel 2
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.mode }} --output-on-failure --no-tests=error
+      # CTest above already ran python/tests from the checkout. This installs
+      # the package into a fresh virtual environment and runs the tests again
+      # with it, against the built tools (build/Release on Windows).
+      - name: Install and test the Python trace writer
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # pwd -W gives a D:/... path that bash and native programs both accept.
+            python -m venv build/pyenv
+            py="$(pwd -W)/build/pyenv/Scripts/python.exe"
+            tools="$(pwd -W)/build/${{ matrix.mode }}"
+          else
+            python3 -m venv build/pyenv
+            py="$PWD/build/pyenv/bin/python"
+            tools="$PWD/build"
+          fi
+          "$py" -m pip install --disable-pip-version-check -e python/
+          (cd "$RUNNER_TEMP" && "$py" -c "import stateguard_trace; print(stateguard_trace.__version__)")
+          STATEGUARD_BUILD_DIR="$tools" "$py" -m unittest discover -s python/tests -v
       - name: Test optional Python capture (no LMCache dependencies)
         if: runner.os != 'Windows'
-        run: python3 -m adapters.lmcache.test_adapter --checker build/stateguard-check
+        run: build/pyenv/bin/python -m adapters.lmcache.test_adapter --checker build/stateguard-check
       - name: Verify install, downstream consumer, and uninstall
         if: matrix.mode == 'Release' && runner.os != 'Windows'
         run: >-
@@ -126,6 +144,9 @@ jobs:
           cmake --build package-build --parallel 2
           ctest --test-dir package-build --output-on-failure --no-tests=error
           python3 unpacked/source/scripts/check_install.py --workdir archive-install-check
+          python3 -m venv archive-pyenv
+          archive-pyenv/bin/python -m pip install --disable-pip-version-check unpacked/source/python
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/archive-pyenv/bin/python" -c "import stateguard_trace")
       - name: Upload tested source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
