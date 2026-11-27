@@ -26,7 +26,7 @@ jobs:
             compiler: clang++-18
             mode: Debug
             flags: -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer
-          - os: macos-14
+          - os: macos-15
             compiler: clang++
             mode: Release
             flags: -Wall -Wextra -Wpedantic -Werror
