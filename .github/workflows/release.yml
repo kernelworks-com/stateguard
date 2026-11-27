@@ -63,7 +63,7 @@ jobs:
             compiler: clang++-18
             mode: Debug
             flags: -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer
-          - os: macos-14
+          - os: macos-15
             compiler: clang++
             mode: Release
             flags: -Wall -Wextra -Wpedantic -Werror
@@ -111,7 +111,7 @@ jobs:
             platform: linux-x86_64
           - os: ubuntu-24.04-arm
             platform: linux-arm64
-          - os: macos-14
+          - os: macos-15
             platform: macos-arm64
     env:
       NAME: stateguard-${{ needs.version.outputs.version }}-${{ matrix.platform }}
