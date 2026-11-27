@@ -7,6 +7,44 @@ package matches versions exactly.
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Added
+
+- `stateguard_trace`, a Python package under `python/` with no dependencies
+  (Python 3.9+). `TraceWriter` and `FileTraceWriter` write every schema-1
+  record, including routed events, completion evidence, cancellation, and
+  `time` lines from an optional clock (`time.monotonic_ns` by default).
+  `check()` and `timeline()` run the command-line tools with `--json` and
+  return the parsed report. Tests rebuild every example in
+  `docs/TRACE-FORMAT.md` and every fixture byte for byte. Install with
+  `pip install "git+https://github.com/kernelworks-com/stateguard#subdirectory=python"`.
+- The CUDA harness records timestamps, so `stateguard-timeline` works on GPU
+  traces. `run_gpu_cancellation` is the device counterpart of the CPU
+  cancellation scenario, with two new demo configurations and `gpu`-labelled
+  tests. `scripts/colab_gpu_check.sh` runs the timeline on every demo trace
+  and records the intervals. Measured once on a Tesla T4; see the reference.
+- LMCache adapter: the dynamic put path at both pinned revisions, a clock
+  option, a written lock order, and a quiescence contract. The adapter tests
+  (35, from 14) run as CTest `lmcache-adapter` on Linux and macOS.
+
+### Changed
+
+- LMCache adapter: `failed_post_is_quiescent=True` is refused unless the
+  caller names the transport with `quiescent_transport`.
+- The adapter's writer moved into `stateguard_trace`. `finish()` now records
+  the request's `finish` event as the format defines it; `end()` closes the
+  trace.
+- CI and release builds run on macOS 15.
+
+### Fixed
+
+- LMCache adapter: a lock-order deadlock between a put that inserts a key
+  and a submit that evicts one.
+- `scripts/agent_fix.py` passes the macOS SDK path to its scratch compile.
+- `scripts/colab_gpu_check.sh` keeps step headers out of the files its
+  timeline steps write.
+
 ## [0.2.0]
 
 ### Added
@@ -95,7 +133,8 @@ checked on one NVIDIA T4.
 Tested configurations are listed in
 [scope and limitations](docs/REFERENCE.md#scope-and-limitations).
 
-[Unreleased]: https://github.com/kernelworks-com/stateguard/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kernelworks-com/stateguard/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.2.0
 [0.1.1]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kernelworks-com/stateguard/releases/tag/v0.1.0
