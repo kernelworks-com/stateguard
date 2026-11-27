@@ -18,7 +18,7 @@ CI runs three configurations, and a change must pass all of them:
 |---|---|---|
 | Ubuntu 24.04 | GCC 13 | Release, warnings as errors, install checks |
 | Ubuntu 24.04 | Clang 18 | Debug, address and undefined-behavior sanitizers |
-| macOS 14 | Apple Clang | Release, warnings as errors, install checks |
+| macOS 15 | Apple Clang | Release, warnings as errors, install checks |
 
 For the sanitizer job use `clang++-18`, `Debug`, and add
 `-fsanitize=address,undefined -fno-omit-frame-pointer` to the flags.
