@@ -300,7 +300,7 @@ if(STATEGUARD_BUILD_TESTS)
       COMMAND stateguard-cuda-copy-demo --repeat 5 --trace-dir ${cli_dir})
     set_tests_properties(cuda-copy-demo PROPERTIES
       FIXTURES_SETUP cuda_traces TIMEOUT 120 LABELS gpu)
-    foreach(name safe safe-delayed)
+    foreach(name safe safe-delayed cancel cancel-delayed)
       add_test(NAME cli-check-cuda-${name}
         COMMAND stateguard-check ${cli_dir}/cuda-${name}.sgtrace)
       set_tests_properties(cli-check-cuda-${name} PROPERTIES
@@ -313,6 +313,22 @@ if(STATEGUARD_BUILD_TESTS)
       set_tests_properties(cli-check-cuda-${name} PROPERTIES
         FIXTURES_REQUIRED cuda_traces LABELS gpu
         PASS_REGULAR_EXPRESSION "^violation\r?\n[0-9]+ premature_reclaim")
+    endforeach()
+    # The demo stamps its traces with the steady clock. Every timeline is
+    # complete; the cancellation reports signal-to-reuse.
+    foreach(name safe immediate)
+      add_test(NAME cli-timeline-cuda-${name}
+        COMMAND stateguard-timeline ${cli_dir}/cuda-${name}.sgtrace)
+      set_tests_properties(cli-timeline-cuda-${name} PROPERTIES
+        FIXTURES_REQUIRED cuda_traces LABELS gpu
+        PASS_REGULAR_EXPRESSION "^complete\r?\nclock steady\r?\nrequest request-1\r?\n  signal unknown\r?\n  ack \\+[0-9]+ ns")
+    endforeach()
+    foreach(name cancel cancel-delayed)
+      add_test(NAME cli-timeline-cuda-${name}
+        COMMAND stateguard-timeline ${cli_dir}/cuda-${name}.sgtrace)
+      set_tests_properties(cli-timeline-cuda-${name} PROPERTIES
+        FIXTURES_REQUIRED cuda_traces LABELS gpu
+        PASS_REGULAR_EXPRESSION "^complete\r?\nclock steady\r?\nrequest request-1\r?\n  signal \\+[0-9]+ ns\r?\n.*  cancellation_to_reuse [0-9]+ ns\r?\n  cancelled_only slot-0#2\r?\n  cancelled_only slot-1#1\r?\n")
     endforeach()
   endif()
 endif()
