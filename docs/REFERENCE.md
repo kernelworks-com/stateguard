@@ -501,7 +501,19 @@ on the last trace of every configuration, fails unless each is complete and
 each cancellation trace has a cancellation-to-reuse interval, and adds the
 interval to its experiment record.
 
-Timeline on a Tesla T4: <<T4-MEASUREMENT>>
+Timeline on a Tesla T4, measured on 2026-11-27 at commit 549dc0c (driver
+580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 61/61 CTest with 11 `gpu`
+tests, 300 runs per configuration): every run of all six configurations had a
+complete timeline, and the verdicts were as before (`clean` 300/300 for the
+safe and cancellation configurations, `premature_reclaim` 300/300 for
+immediate reclamation, with the cache corrupted in 300/300 delayed runs). In
+both cancellation configurations the copy was still running on the device
+when the cancellation was acknowledged in 300/300 runs, the output arrived
+intact in 300/300, and no buffer was reclaimed while the copy was pending. In
+the last run of each, cancellation-to-reuse was 0.573 ms without a start
+delay and 20.652 ms with the 20 ms delay, and signal-to-acknowledgment was
+336 ns and 314 ns. These are single measurements on one shared machine, not
+a performance claim.
 
 Checked on 2026-11-04 at tag v0.1.0 (commit cb2e159): Tesla T4 (compute 7.5),
 driver 580.82.07, CUDA 13.0, GCC 13.3 on Ubuntu 24.04, 52/52 CTest (5 `gpu`
