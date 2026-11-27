@@ -412,6 +412,10 @@ class Builder:
         flags = cache.get("CMAKE_CXX_FLAGS", "") + " " + cache.get(
             f"CMAKE_CXX_FLAGS_{build_type}", "-O2" if not build_type else "")
         self.flags = shlex.split(flags) + ["-std=c++20"]
+        # CMake passes the macOS SDK separately from CMAKE_CXX_FLAGS.
+        sysroot = cache.get("CMAKE_OSX_SYSROOT", "")
+        if sysroot:
+            self.flags += ["-isysroot", sysroot]
         self.library = None
         for name in ("libstateguard.a", "stateguard.lib"):
             path = os.path.join(build_dir, name)
